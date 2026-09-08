@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     media_signing_secret: str = ""
     media_url_expire_sec: int = 3600
     ab_test_scheduler_interval_sec: int = 60
+    ab_test_no_progress_timeout_sec: int = 172800
 
     @field_validator("cors_origins", mode="before")
     @classmethod

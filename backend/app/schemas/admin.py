@@ -154,3 +154,21 @@ class AdminSettingsResponse(BaseModel):
 
 class AdminSettingsUpdateRequest(BaseModel):
     registration_enabled: bool
+
+
+class AdminAuditItem(BaseModel):
+    id: int
+    actor_user_id: int | None = None
+    actor_email: EmailStr
+    action: str
+    target_type: str
+    target_id: int | None = None
+    summary: str
+    before_state: dict
+    after_state: dict
+    created_at: datetime
+
+
+class AdminAuditResponse(BaseModel):
+    items: list[AdminAuditItem]
+    total: int

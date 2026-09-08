@@ -15,22 +15,29 @@ from app.core.database import AsyncSessionLocal
 class WBRateLimiter:
     """Serialize seller-scoped WB mutations and fullstats requests."""
 
-    _locks: defaultdict[tuple[int, int], asyncio.Lock] = defaultdict(asyncio.Lock)
+    _locks: defaultdict[tuple[int, int, int], asyncio.Lock] = defaultdict(asyncio.Lock)
     _locks_guard = asyncio.Lock()
     FULLSTATS_INTERVAL_SECONDS = 20.2
 
     @classmethod
-    async def _lock_for(cls, connection_id: int, resource_id: int) -> asyncio.Lock:
+    async def _lock_for(cls, connection_id: int, resource_id: int, seller_id: int | None = None) -> asyncio.Lock:
         async with cls._locks_guard:
-            return cls._locks[(int(connection_id), int(resource_id))]
+            return cls._locks[(int(seller_id or 0), int(connection_id), int(resource_id))]
 
     @classmethod
     @asynccontextmanager
-    async def operation_lock(cls, db: AsyncSession, connection_id: int, nm_id: int) -> AsyncIterator[None]:
-        lock = await cls._lock_for(connection_id, nm_id)
+    async def operation_lock(
+        cls,
+        db: AsyncSession,
+        connection_id: int,
+        nm_id: int,
+        seller_id: int | None = None,
+    ) -> AsyncIterator[None]:
+        lock = await cls._lock_for(connection_id, nm_id, seller_id)
         async with lock:
             lock_db: AsyncSession | None = None
-            lock_key = f"wb-ab-test:{int(connection_id)}:{int(nm_id)}"
+            lock_scope = int(seller_id or connection_id)
+            lock_key = f"wb-ab-test:{lock_scope}:{int(nm_id)}"
             try:
                 bind = db.get_bind()
                 if bind.dialect.name == "postgresql":

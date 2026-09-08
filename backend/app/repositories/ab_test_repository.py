@@ -58,9 +58,9 @@ class ABTestRepository:
         )
         return list((await self.db.scalars(query)).all())
 
-    async def get_running_for_card(self, connection_id: int, nm_id: int, *, exclude_test_id: int | None = None) -> ABTest | None:
+    async def get_running_for_user_card(self, user_id: int, nm_id: int, *, exclude_test_id: int | None = None) -> ABTest | None:
         query = select(ABTest).where(
-            ABTest.connection_id == connection_id,
+            ABTest.user_id == user_id,
             ABTest.nm_id == nm_id,
             ABTest.status == ABTestStatus.RUNNING,
         )

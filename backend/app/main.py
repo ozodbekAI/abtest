@@ -4,13 +4,17 @@ import hmac
 from pathlib import Path
 import time
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
+from sqlalchemy import inspect, select
 
 from app.core.config import settings
 from app.core.database import AsyncSessionLocal, Base, engine
-from app.core.security import hash_password
+from app.core.database import get_db
+from app.core.security import get_current_user, hash_password
+from app.models.ab_test import ABTest
+from app.models.user import User
 from app.repositories.user_repository import UserRepository
 from app.routers import ab_tests, admin, auth, health, wb
 from app.services.ab_test_scheduler import ABTestScheduler
@@ -21,6 +25,47 @@ from app import models  # noqa: F401,E402
 
 MEDIA_ROOT = Path(settings.media_root).expanduser().resolve()
 MEDIA_ROOT.mkdir(parents=True, exist_ok=True)
+
+
+def _check_required_schema(sync_connection) -> None:
+    inspector = inspect(sync_connection)
+    required_columns = {
+        "ab_tests": {
+            "winner_decision",
+            "last_total_orders",
+            "media_state",
+            "operation_state",
+            "campaign_state",
+            "media_status",
+            "stats_quality",
+            "incident_id",
+            "unallocated_views",
+            "unallocated_clicks",
+            "unallocated_spend_rub",
+        },
+        "ab_test_operations": {"operation_key", "status", "request_snapshot", "response_snapshot"},
+        "wb_connections": {"analytics_access", "statistics_access", "ready_for_ab_tests"},
+    }
+    missing: list[str] = []
+    for table, columns in required_columns.items():
+        if not inspector.has_table(table):
+            missing.append(f"таблица {table}")
+            continue
+        existing = {column["name"] for column in inspector.get_columns(table)}
+        missing.extend(f"{table}.{column}" for column in sorted(columns - existing))
+    if not inspector.has_table("admin_audit_logs"):
+        missing.append("таблица admin_audit_logs")
+    if missing:
+        raise RuntimeError(
+            "Схема PostgreSQL не обновлена. Отсутствуют: "
+            + ", ".join(missing[:12])
+            + ". Выполните: PYTHONPATH=backend ./venv/bin/python -m alembic -c backend/alembic.ini upgrade head"
+        )
+
+
+async def ensure_schema_ready() -> None:
+    async with engine.connect() as connection:
+        await connection.run_sync(_check_required_schema)
 
 
 async def ensure_configured_admin() -> None:
@@ -60,6 +105,7 @@ async def lifespan(_: FastAPI):
     if settings.auto_create_tables and settings.app_env != "production":
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
+    await ensure_schema_ready()
     await ensure_configured_admin()
     scheduler = ABTestScheduler()
     scheduler.start()
@@ -94,6 +140,8 @@ async def get_media(
     file_path: str,
     expires: int = Query(gt=0),
     signature: str = Query(min_length=64, max_length=64),
+    current_user: User = Depends(get_current_user),
+    db=Depends(get_db),
 ):
     """Serve uploaded previews through a short-lived, non-guessable URL."""
     if expires < int(time.time()):
@@ -101,6 +149,14 @@ async def get_media(
     secret = (settings.media_signing_secret.strip() or settings.jwt_secret_key).encode()
     expected = hmac.new(secret, f"{file_path}:{expires}".encode(), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature):
+        raise HTTPException(status_code=404, detail="Изображение не найдено")
+    parts = file_path.split("/")
+    if len(parts) < 3 or parts[0] != "ab_tests" or not parts[1].isdigit():
+        raise HTTPException(status_code=404, detail="Изображение не найдено")
+    owns_test = await db.scalar(
+        select(ABTest.id).where(ABTest.id == int(parts[1]), ABTest.user_id == current_user.id)
+    )
+    if owns_test is None:
         raise HTTPException(status_code=404, detail="Изображение не найдено")
     target = (MEDIA_ROOT / file_path).resolve()
     try:

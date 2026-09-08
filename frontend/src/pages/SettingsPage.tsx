@@ -5,14 +5,12 @@ import { toast } from 'sonner';
 import { AppShell } from '../components/AppShell';
 import { api } from '../api/client';
 import type { WBConnection } from '../types';
-
-const ACTIVE_STORE_KEY = 'wb_optimizer_active_store_id';
+import { publishActiveStoreId, readActiveStoreId, subscribeActiveStoreId } from '../utils/activeStore';
 
 export function SettingsPage() {
   const [connections, setConnections] = useState<WBConnection[]>([]);
   const [activeConnectionId, setActiveConnectionId] = useState<number | null>(() => {
-    const storedId = Number(localStorage.getItem(ACTIVE_STORE_KEY));
-    return Number.isInteger(storedId) && storedId > 0 ? storedId : null;
+    return readActiveStoreId();
   });
   const [token, setToken] = useState('');
   const [storeName, setStoreName] = useState('');
@@ -29,14 +27,13 @@ export function SettingsPage() {
     try {
       const result = await api.getWBConnections();
       setConnections(result);
-      const storedId = Number(localStorage.getItem(ACTIVE_STORE_KEY));
-      const selected = result.find((item) => item.id === storedId) || result[0];
+      const selected = result.find((item) => item.id === readActiveStoreId()) || result[0];
       if (selected) {
         setActiveConnectionId(selected.id);
-        localStorage.setItem(ACTIVE_STORE_KEY, String(selected.id));
+        publishActiveStoreId(selected.id);
       } else {
         setActiveConnectionId(null);
-        localStorage.removeItem(ACTIVE_STORE_KEY);
+        publishActiveStoreId(null);
       }
     } catch (error: any) {
       toast.error(error?.message || 'Не удалось загрузить магазины');
@@ -44,10 +41,11 @@ export function SettingsPage() {
   };
 
   useEffect(() => { void loadConnections(); }, []);
+  useEffect(() => subscribeActiveStoreId((id) => setActiveConnectionId(id)), []);
 
   const selectConnection = (connectionId: number) => {
     setActiveConnectionId(connectionId);
-    localStorage.setItem(ACTIVE_STORE_KEY, String(connectionId));
+    publishActiveStoreId(connectionId);
   };
 
   const addConnection = async (event: React.FormEvent) => {
@@ -93,8 +91,7 @@ export function SettingsPage() {
       setConnections(remaining);
       const next = remaining[0];
       setActiveConnectionId(next?.id || null);
-      if (next) localStorage.setItem(ACTIVE_STORE_KEY, String(next.id));
-      else localStorage.removeItem(ACTIVE_STORE_KEY);
+      publishActiveStoreId(next?.id || null);
       toast.success('Магазин удалён');
     } catch (error: any) {
       toast.error(error?.message || 'Не удалось удалить магазин');

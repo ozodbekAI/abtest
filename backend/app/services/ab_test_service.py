@@ -43,9 +43,17 @@ class ABTestReconciliationRequired(RuntimeError):
         self.incident_id = incident_id
 
 
+class ABCampaignProductMismatch(ABTestReconciliationRequired):
+    """A campaign was confirmed, but it contains another product."""
+
+
 class ABTestService:
     MAX_IMAGE_BYTES = 32 * 1024 * 1024
-    MAX_VARIANTS = 30
+    # A/B experiments are intentionally limited to 2–5 tested images.  The
+    # product-card API supports up to 30 media slots, but those are not 30
+    # statistically comparable experiment variants. Keeping this limit in the
+    # service also protects direct API callers that bypass the wizard.
+    MAX_VARIANTS = 5
     ALLOWED_IMAGE_TYPES = {
         "image/jpeg",
         "image/png",
@@ -69,11 +77,12 @@ class ABTestService:
     WINNER_MIN_VARIANTS = 2
     WINNER_MIN_IMPRESSIONS = 300
     WINNER_MIN_CTR_DELTA = 0.35
-    WINNER_MIN_SCORE_DELTA = 0.06
     CAMPAIGN_ACTIVE_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_STOP_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_BUDGET_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
+    CAMPAIGN_DETAILS_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
     MAX_STATS_STALE_SECONDS = 300
+    MIN_NO_PROGRESS_TIMEOUT_SECONDS = 3600
 
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -93,6 +102,16 @@ class ABTestService:
         if tested_variant_count <= 0:
             return int(test.budget_rub or 0)
         return calculate_required_budget(tested_variant_count, test.views_per_variant, test.cpm_rub)
+
+    @classmethod
+    def _validate_test_variant_count(cls, variant_count: int, *, skip_current_photo: bool) -> int:
+        """Validate the final number of images compared by an experiment."""
+        tested_variant_count = int(variant_count) + (0 if skip_current_photo else 1)
+        if tested_variant_count < cls.WINNER_MIN_VARIANTS:
+            raise HTTPException(status_code=400, detail="Добавьте минимум 2 изображения для сравнения")
+        if tested_variant_count > cls.MAX_VARIANTS:
+            raise HTTPException(status_code=400, detail="В одном тесте может быть от 2 до 5 изображений")
+        return tested_variant_count
 
     @staticmethod
     def _incident_id() -> str:
@@ -371,9 +390,47 @@ class ABTestService:
             raise last_error
         return int(last_budget or 0)
 
+    async def _confirm_campaign_product(
+        self,
+        promotion: WBPromotionClient,
+        campaign_id: int,
+        nm_id: int,
+    ) -> None:
+        """Prove that the external campaign contains the selected product.
+
+        WB's campaign details are eventually consistent. We wait through the
+        read-model delay, but never treat an empty response as a match. This
+        guard runs before budget deposit and campaign start.
+        """
+        last_details: dict[str, Any] | None = None
+        for delay in self.CAMPAIGN_DETAILS_CONFIRM_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            details = await promotion.get_campaign_details(campaign_id)
+            if details is None:
+                continue
+            last_details = details
+            campaign_nm_ids = promotion.campaign_nm_ids(details)
+            if int(nm_id) in campaign_nm_ids:
+                return
+            if campaign_nm_ids:
+                raise ABCampaignProductMismatch(
+                    f"Кампания WB #{int(campaign_id)} относится к другой карточке, а не к nmID {int(nm_id)}. "
+                    "Кампания остановлена; требуется ручная сверка.",
+                )
+        if last_details is None:
+            raise ABTestReconciliationRequired(
+                f"Wildberries пока не подтвердил состав кампании WB #{int(campaign_id)}. "
+                "Деньги не пополнялись; повторите сверку позже.",
+            )
+        raise ABTestReconciliationRequired(
+            f"Wildberries не подтвердил nmID {int(nm_id)} в кампании WB #{int(campaign_id)}. "
+            "Деньги не пополнялись; требуется ручная сверка.",
+        )
+
     @asynccontextmanager
-    async def _operation_lock(self, connection_id: int, nm_id: int):
-        async with WBRateLimiter.operation_lock(self.db, connection_id, nm_id):
+    async def _operation_lock(self, connection_id: int, nm_id: int, user_id: int | None = None):
+        async with WBRateLimiter.operation_lock(self.db, connection_id, nm_id, seller_id=user_id):
             yield
 
     @asynccontextmanager
@@ -467,7 +524,14 @@ class ABTestService:
         return extension if extension != ".jpe" else ".jpg"
 
     @classmethod
-    def _prepare_image(cls, filename: str, content_type: str, data: bytes) -> tuple[str, str, bytes]:
+    def _prepare_image(
+        cls,
+        filename: str,
+        content_type: str,
+        data: bytes,
+        *,
+        verify_integrity: bool = True,
+    ) -> tuple[str, str, bytes]:
         """Validate an upload and convert TIFF to a WB-compatible JPEG.
 
         Wildberries does not accept TIFF in the product media API. Conversion
@@ -507,6 +571,19 @@ class ABTestService:
             return converted_name, "image/jpeg", converted
 
         cls._validate_image(original_name, normalized_type, data)
+        if verify_integrity:
+            try:
+                from PIL import Image, UnidentifiedImageError
+            except ImportError as exc:
+                raise HTTPException(status_code=503, detail="Проверка изображения временно недоступна на сервере") from exc
+            try:
+                # Header dimensions alone are not enough: a truncated JPEG/PNG
+                # can still advertise valid dimensions. Verify the complete
+                # uploaded file before it is persisted or offered to WB.
+                with Image.open(io.BytesIO(data)) as image:
+                    image.verify()
+            except (UnidentifiedImageError, OSError, ValueError, EOFError) as exc:
+                raise HTTPException(status_code=400, detail="Файл изображения повреждён или не читается полностью") from exc
         return original_name, (
             normalized_type if normalized_type in cls.ALLOWED_IMAGE_TYPES else mimetypes.guess_type(original_name)[0] or "image/jpeg"
         ), data
@@ -515,8 +592,7 @@ class ABTestService:
         """Convert an uploaded image to a browser-previewable data URL."""
         del user_id  # Authentication is enforced by the router; previews are not persisted.
         data = await file.read(self.MAX_IMAGE_BYTES + 1)
-        filename, content_type, prepared = await asyncio.to_thread(
-            self._prepare_image,
+        filename, content_type, prepared = self._prepare_image(
             file.filename or "image.tiff",
             file.content_type or "",
             data,
@@ -585,12 +661,12 @@ class ABTestService:
         return None
 
     async def upload_variant(self, user_id: int, test_id: int, position: int, file: UploadFile) -> ABTest:
-        if position < 1 or position > 30:
-            raise HTTPException(status_code=422, detail="Позиция варианта должна быть от 1 до 30")
+        if position < 1 or position > self.MAX_VARIANTS:
+            raise HTTPException(status_code=422, detail="Позиция варианта должна быть от 1 до 5")
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -598,8 +674,7 @@ class ABTestService:
                 raise HTTPException(status_code=409, detail="Изменять варианты можно только в черновике")
             data = await file.read(self.MAX_IMAGE_BYTES + 1)
             original_filename = file.filename or "image.jpg"
-            filename, content_type, data = await asyncio.to_thread(
-                self._prepare_image,
+            filename, content_type, data = self._prepare_image(
                 original_filename,
                 file.content_type or "",
                 data,
@@ -608,6 +683,15 @@ class ABTestService:
             directory = self._media_root() / "ab_tests" / str(test.id)
             directory.mkdir(parents=True, exist_ok=True)
             old = await self.repository.get_variant(test.id, position)
+            for existing in test.variants:
+                if existing.position == position or existing.source_type != "upload" or not existing.file_path:
+                    continue
+                try:
+                    same_file = (self._media_root() / existing.file_path).read_bytes() == data
+                except OSError:
+                    same_file = False
+                if same_file:
+                    raise HTTPException(status_code=409, detail="Один и тот же файл нельзя использовать дважды в тесте")
             if old and old.file_path:
                 (self._media_root() / old.file_path).unlink(missing_ok=True)
             file_path = Path("ab_tests") / str(test.id) / f"{position}_{secrets.token_hex(10)}{extension}"
@@ -632,7 +716,7 @@ class ABTestService:
     async def set_variant_source(self, user_id: int, test_id: int, position: int, source_url: str) -> ABTest:
         """Attach one of the product's existing WB photos to a draft variant."""
         if position < 1 or position > self.MAX_VARIANTS:
-            raise HTTPException(status_code=422, detail="Позиция варианта должна быть от 1 до 30")
+            raise HTTPException(status_code=422, detail="Позиция варианта должна быть от 1 до 5")
         clean_url = str(source_url or "").strip()
         parsed = urlsplit(clean_url)
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
@@ -640,7 +724,7 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -658,7 +742,26 @@ class ABTestService:
             )
             if not selected_url:
                 raise HTTPException(status_code=400, detail="Изображение больше не найдено в карточке Wildberries")
+            # The control image is already part of the card and must not be
+            # added as a second tested variant. Enforce this server-side as
+            # well as in the picker so direct API calls cannot create a
+            # misleading test configuration.
+            if photos and self._canonical_media_url(selected_url) == self._canonical_media_url(photos[0]):
+                raise HTTPException(status_code=409, detail="Главное фото карточки нельзя добавить вторым вариантом")
             old = await self.repository.get_variant(test.id, position)
+            duplicate_card_variant = next(
+                (
+                    variant
+                    for variant in test.variants
+                    if variant.position != position
+                    and variant.source_type == "card"
+                    and self._canonical_media_url(variant.source_url or "")
+                    == self._canonical_media_url(selected_url)
+                ),
+                None,
+            )
+            if duplicate_card_variant:
+                raise HTTPException(status_code=409, detail="Одно и то же фото карточки нельзя использовать дважды в тесте")
             if old and old.file_path:
                 (self._media_root() / old.file_path).unlink(missing_ok=True)
             file_name = f"Фото карточки {photos.index(selected_url) + 1}"
@@ -683,7 +786,7 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -701,7 +804,7 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -819,6 +922,18 @@ class ABTestService:
         for slot, url in enumerate(original_media, start=1):
             data, mime = await content.download_image(url, cache_bust=True)
             extension = self._image_extension(mime, url)
+            filename = Path(urlsplit(url).path).name or f"original_{slot}{extension}"
+            # A 200 response and an image/* MIME type are not enough for a
+            # safe rollback: a truncated or HTML payload must be rejected
+            # before the first card mutation. This is format validation only;
+            # it deliberately does not compare media digests or read the card
+            # back after an upload.
+            filename, mime, data = self._prepare_image(
+                filename,
+                mime or "image/jpeg",
+                data,
+            )
+            extension = Path(filename).suffix.lower() or extension
             relative = base / f"slot_{slot}{extension}"
             target = self._media_root() / relative
             target.write_bytes(data)
@@ -826,7 +941,7 @@ class ABTestService:
                 "path": str(relative),
                 "url": url,
                 "mime": mime or "image/jpeg",
-                "file_name": Path(urlsplit(url).path).name or f"original_{slot}{extension}",
+                "file_name": filename,
             }
 
         source_slots = {
@@ -926,7 +1041,7 @@ class ABTestService:
         # Uploaded files are already prepared before persistence. Keep this
         # final guard synchronous so the polling worker remains deterministic
         # when a remote/card source also happens to be a TIFF.
-        filename, mime, data = self._prepare_image(filename, mime, data)
+        filename, mime, data = self._prepare_image(filename, mime, data, verify_integrity=False)
         self._validate_image(filename, mime, data)
         logger.info(
             "A/B apply variant test_id=%s nm_id=%s position=%s source=%s bytes=%s",
@@ -962,7 +1077,7 @@ class ABTestService:
             data, mime, filename = self._read_state_slot(state, source_slot)
         else:
             data, mime, filename = await self._variant_bytes(test, variant, content)
-        filename, mime, data = self._prepare_image(filename, mime, data)
+        filename, mime, data = self._prepare_image(filename, mime, data, verify_integrity=False)
         self._validate_image(filename, mime, data)
 
         changed_slots: set[int] = {1}
@@ -1249,6 +1364,8 @@ class ABTestService:
             return False
         phase = (operation.response_snapshot or {}).get("phase")
         operation_status = operation.status.value if isinstance(operation.status, ABTestOperationStatus) else str(operation.status)
+        if phase == "paused_minimum_bid":
+            return True
         return phase in {
             "campaign_created",
             "campaign_reused",
@@ -1270,7 +1387,7 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -1304,16 +1421,37 @@ class ABTestService:
                 )
             if test.status != ABTestStatus.DRAFT:
                 raise HTTPException(status_code=409, detail="Запустить можно только черновик A/B-теста")
-            running_test = await self.repository.get_running_for_card(test.connection_id, test.nm_id, exclude_test_id=test.id)
+            # The same seller can accidentally connect one WB cabinet twice
+            # under different labels. Lock the product at user scope so a
+            # second connection cannot start a competing photo experiment.
+            running_test = await self.repository.get_running_for_user_card(test.user_id, test.nm_id, exclude_test_id=test.id)
             if running_test:
                 raise HTTPException(status_code=409, detail="Для этой карточки уже запущен другой A/B-тест")
             connection = await self._connection_or_404(user_id, test.connection_id)
             content, promotion = await self._clients(connection)
+
+            # Do the read-only card/access preflight before creating a campaign
+            # or depositing money. A category ping alone is not enough to know
+            # that the selected card is still available.
+            try:
+                preflight_card = await content.get_card(test.nm_id)
+            except Exception as exc:
+                raise self._api_error(exc) from exc
+            if not preflight_card or not WBContentClient.photo_urls(preflight_card):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Карточка Wildberries недоступна или в ней нет фотографий. Запуск заблокирован.",
+                )
+            if request.auto_deposit:
+                try:
+                    await promotion.get_balance()
+                except Exception as exc:
+                    raise self._api_error(exc) from exc
+
             variants = [variant for variant in test.variants if variant.source_type != "control"]
-            if len(variants) < self.WINNER_MIN_VARIANTS:
-                raise HTTPException(status_code=400, detail="Добавьте минимум 2 изображения для сравнения")
-            if len(variants) > self.MAX_VARIANTS:
-                raise HTTPException(status_code=400, detail="В одном тесте может быть не больше 30 изображений")
+            tested_variant_count = self._validate_test_variant_count(
+                len(variants), skip_current_photo=bool(test.skip_current_photo)
+            )
             positions = sorted(variant.position for variant in variants)
             if positions != list(range(1, len(positions) + 1)):
                 raise HTTPException(status_code=400, detail="Позиции изображений должны идти последовательно, начиная с 1")
@@ -1331,6 +1469,24 @@ class ABTestService:
             saved_funding_source = (latest_operation.request_snapshot or {}).get("funding_source") if latest_operation else None
             if selected_funding_source == "auto" and saved_funding_source in {"account", "mutual", "bonus"}:
                 selected_funding_source = saved_funding_source
+            if request.auto_deposit and selected_funding_source == "auto":
+                # Never let an older client silently fall back from the
+                # user's intended source to account/mutual settlement. A
+                # deposit is an irreversible external money operation, so a
+                # fresh explicit confirmation is required when no source was
+                # saved with the original start request.
+                raise HTTPException(
+                    status_code=400,
+                    detail={
+                        "code": "funding_source_required",
+                        "message": (
+                            "Для автоматического пополнения выберите источник средств: "
+                            "счёт Продвижения, баланс взаиморасчётов или промо-бонусы WB."
+                        ),
+                        "campaign_id": int(test.wb_campaign_id) if test.wb_campaign_id else None,
+                        "reuse_existing_campaign": bool(test.wb_campaign_id),
+                    },
+                )
             resume_campaign_id: int | None = None
             if self._can_resume_existing_campaign(test, latest_operation):
                 try:
@@ -1408,7 +1564,7 @@ class ABTestService:
                 await self._operation_state(test, operation, ABTestOperationStatus.IN_PROGRESS)
                 operation.response_snapshot = {"phase": "preparing_card"}
                 await self.db.commit()
-                card = await content.get_card(test.nm_id)
+                card = preflight_card
                 original_media = WBContentClient.photo_urls(card or {})
                 if not original_media:
                     raise RuntimeError("Карточка товара не найдена или в ней нет исходного изображения")
@@ -1451,6 +1607,7 @@ class ABTestService:
                     await self.db.commit()
                     logger.info("A/B campaign created test_id=%s nm_id=%s campaign_id=%s", test.id, test.nm_id, campaign_id)
                 await self.db.flush()
+                await self._confirm_campaign_product(promotion, campaign_id, test.nm_id)
                 minimum_bid = await promotion.get_min_bid(
                     campaign_id=campaign_id,
                     nm_id=test.nm_id,
@@ -1469,36 +1626,26 @@ class ABTestService:
                         minimum_bid,
                     )
                     await self.db.flush()
-                    if resume_campaign_id:
-                        # The user already confirmed a resume action. Apply
-                        # the current WB minimum to this same campaign and
-                        # continue; the first-start flow still returns the
-                        # structured 409 popup for an explicit review.
-                        operation.response_snapshot = {
-                            "phase": "campaign_reused_minimum_bid",
-                            "campaign_id": resume_campaign_id,
-                            "previous_cpm": previous_cpm,
+                    # A previous resume click is not a blanket permission to
+                    # spend a newly recalculated amount. Every bid increase
+                    # invalidates the old confirmation, including on the same
+                    # existing campaign.
+                    raise HTTPException(
+                        status_code=409,
+                        detail={
+                            "code": "minimum_cpm_increased",
+                            "message": (
+                                f"Минимальная ставка Wildberries сейчас {minimum_bid} ₽. "
+                                "CPM и необходимый бюджет пересчитаны. Подтвердите повторный запуск."
+                            ),
                             "minimum_cpm": int(minimum_bid),
+                            "previous_cpm": previous_cpm,
                             "recalculated_budget": int(test.budget_rub),
-                        }
-                        await self.db.commit()
-                    else:
-                        raise HTTPException(
-                            status_code=409,
-                            detail={
-                                "code": "minimum_cpm_increased",
-                                "message": (
-                                    f"Минимальная ставка Wildberries сейчас {minimum_bid} ₽. "
-                                    "CPM и необходимый бюджет пересчитаны. Подтвердите повторный запуск."
-                                ),
-                                "minimum_cpm": int(minimum_bid),
-                                "previous_cpm": previous_cpm,
-                                "recalculated_budget": int(test.budget_rub),
-                                "tested_variant_count": int(tested_variant_count),
-                                "campaign_id": int(campaign_id),
-                                "reuse_existing_campaign": False,
-                            },
-                        )
+                            "tested_variant_count": int(tested_variant_count),
+                            "campaign_id": int(campaign_id),
+                            "reuse_existing_campaign": bool(resume_campaign_id),
+                        },
+                    )
                 try:
                     await promotion.set_bid(
                         campaign_id=campaign_id,
@@ -1526,39 +1673,22 @@ class ABTestService:
                             test.views_per_variant,
                             refreshed_minimum,
                         )
-                        if resume_campaign_id:
-                            operation.response_snapshot = {
-                                "phase": "campaign_reused_minimum_bid",
-                                "campaign_id": int(campaign_id),
-                                "previous_cpm": previous_cpm,
+                        raise HTTPException(
+                            status_code=409,
+                            detail={
+                                "code": "minimum_cpm_increased",
+                                "message": (
+                                    f"Минимальная ставка Wildberries сейчас {refreshed_minimum} ₽. "
+                                    "CPM и необходимый бюджет пересчитаны. Подтвердите повторный запуск."
+                                ),
                                 "minimum_cpm": int(refreshed_minimum),
+                                "previous_cpm": previous_cpm,
                                 "recalculated_budget": int(test.budget_rub),
-                            }
-                            await self.db.commit()
-                            await promotion.set_bid(
-                                campaign_id=campaign_id,
-                                nm_id=test.nm_id,
-                                cpm_rub=test.cpm_rub,
-                                placement=test.placement,
-                                bid_type=test.bid_type,
-                            )
-                        else:
-                            raise HTTPException(
-                                status_code=409,
-                                detail={
-                                    "code": "minimum_cpm_increased",
-                                    "message": (
-                                        f"Минимальная ставка Wildberries сейчас {refreshed_minimum} ₽. "
-                                        "CPM и необходимый бюджет пересчитаны. Подтвердите повторный запуск."
-                                    ),
-                                    "minimum_cpm": int(refreshed_minimum),
-                                    "previous_cpm": previous_cpm,
-                                    "recalculated_budget": int(test.budget_rub),
-                                    "tested_variant_count": int(tested_variant_count),
-                                    "campaign_id": int(campaign_id),
-                                    "reuse_existing_campaign": False,
-                                },
-                            ) from bid_error
+                                "tested_variant_count": int(tested_variant_count),
+                                "campaign_id": int(campaign_id),
+                                "reuse_existing_campaign": bool(resume_campaign_id),
+                            },
+                        ) from bid_error
                     raise
 
                 estimated_budget = calculate_required_budget(
@@ -1654,11 +1784,15 @@ class ABTestService:
                         )
                     except WBApiError as deposit_error:
                         # The campaign already exists and must remain reusable.
-                        # Persist the rejected phase before surfacing a clear
-                        # user-facing error; retrying must never create a new
-                        # campaign just because the funding source was empty.
+                        # A definitive validation/permission 4xx means WB
+                        # rejected the money operation. A timeout, 429, or
+                        # 5xx does not prove that the request was not accepted;
+                        # classify it as pending so a retry cannot charge the
+                        # same source twice.
+                        definitive_rejection = deposit_error.status_code in {400, 401, 403, 404, 422}
+                        deposit_phase = "budget_deposit_rejected" if definitive_rejection else "budget_deposit_pending"
                         operation.response_snapshot = {
-                            "phase": "budget_deposit_rejected",
+                            "phase": deposit_phase,
                             "campaign_id": int(campaign_id),
                             "amount_rub": shortfall,
                             "required_budget": int(required_budget),
@@ -1670,16 +1804,25 @@ class ABTestService:
                         provider_message = str(deposit_error).removeprefix("WB Продвижение:").strip()
                         if provider_message.lower() in {"bad request", "неправильный запрос"}:
                             provider_message = "WB не сообщил дополнительную причину"
+                        if definitive_rejection:
+                            message = (
+                                f"Wildberries не принял автоматическое пополнение кампании WB #{int(campaign_id)} "
+                                f"на {shortfall} ₽. {provider_message}. "
+                                f"Проверьте доступность {funding_source_label} в кабинете WB и повторите запуск. "
+                                "Будет продолжена эта же кампания, новая создана не будет."
+                            )
+                            code = "campaign_budget_deposit_failed"
+                        else:
+                            message = (
+                                f"Результат пополнения кампании WB #{int(campaign_id)} на {shortfall} ₽ не подтверждён. "
+                                "Повторное списание заблокировано. Проверьте бюджет кампании в кабинете WB и повторите сверку."
+                            )
+                            code = "campaign_budget_deposit_pending"
                         raise HTTPException(
                             status_code=409,
                             detail={
-                                "code": "campaign_budget_deposit_failed",
-                                "message": (
-                                    f"Wildberries не принял автоматическое пополнение кампании WB #{int(campaign_id)} "
-                                    f"на {shortfall} ₽. {provider_message}. "
-                                    f"Проверьте доступность {funding_source_label} в кабинете WB и повторите запуск. "
-                                    "Будет продолжена эта же кампания, новая создана не будет."
-                                ),
+                                "code": code,
+                                "message": message,
                                 "campaign_id": int(campaign_id),
                                 "required_budget": int(required_budget),
                                 "available_budget": int(current_budget),
@@ -1802,6 +1945,18 @@ class ABTestService:
                     test.incident_id = test.incident_id or self._incident_id()
                     cleanup_errors.append("ID кампании не получен; результат создания кампании нужно сверить в кабинете WB")
 
+                # A confirmed product mismatch must never be offered for a
+                # retry: reusing it would keep advertising the wrong card.
+                # Keep the external campaign ID for manual handling, but
+                # quarantine it from the normal same-campaign resume path.
+                if isinstance(exc, ABCampaignProductMismatch):
+                    test.campaign_state = "quarantined"
+                    operation.response_snapshot = {
+                        "phase": "campaign_mismatch",
+                        "campaign_id": int(campaign_id) if campaign_id else None,
+                        "nm_id": int(test.nm_id),
+                    }
+
                 state = self._media_state(test)
                 media_needs_restore = media_changed or bool(state.get("touched") or state.get("pending"))
                 media_restored = not media_needs_restore
@@ -1812,7 +1967,13 @@ class ABTestService:
                     except Exception as cleanup_exc:
                         cleanup_errors.append(f"восстановление фото не подтверждено: {self._safe_error(cleanup_exc)}")
 
-                unresolved = bool(cleanup_errors) or (campaign_creation_attempted and not campaign_id) or not campaign_stopped or not media_restored
+                unresolved = (
+                    bool(cleanup_errors)
+                    or isinstance(exc, ABTestReconciliationRequired)
+                    or (campaign_creation_attempted and not campaign_id)
+                    or not campaign_stopped
+                    or not media_restored
+                )
                 safe_error = self._safe_error(exc)
                 if unresolved:
                     test.status = ABTestStatus.FAILED
@@ -1845,40 +2006,36 @@ class ABTestService:
 
     @classmethod
     def _winner_result(cls, test: ABTest) -> tuple[ABTestVariant | None, str]:
-        """Apply the same conservative decision rules as the legacy engine.
+        """Select a winner from attributable, sufficiently large CTR samples.
 
-        CTR alone is too noisy for small samples. The score combines normalized
-        CTR, a clicks proxy and confidence, then requires both a minimum sample
-        and a meaningful gap from the runner-up.
+        The product decision is deliberately CTR-only. Clicks and impressions
+        are used to calculate CTR and to enforce the minimum sample, but they do
+        not add a second hidden score. Campaign-level ``fullstats`` cannot prove
+        which photo generated a click, so aggregate or incomplete data must
+        never produce a winner.
         """
-        # Aggregate stats are collected sequentially: each completed stage
-        # belongs to the photo that was active during that stage. They are not
-        # a reason to hide the completed result. Only an unresolved
-        # reconciliation incident must block winner selection.
-        if getattr(test, "stats_quality", None) == "reconciliation_required":
+        stats_quality = getattr(test, "stats_quality", None)
+        if stats_quality in {
+            "aggregate_unverified",
+            "incomplete",
+            "no_data",
+            "reconciliation_required",
+        }:
             return None, "statistics_not_attributable"
-        candidates = [variant for variant in test.variants if variant.source_type != "control"]
+        candidates = [
+            variant
+            for variant in test.variants
+            if variant.source_type != "control"
+            or (not bool(test.skip_current_photo) and variant.position == 0)
+        ]
         if len(candidates) < cls.WINNER_MIN_VARIANTS:
             return None, "insufficient_data"
         if min((variant.views for variant in candidates), default=0) < cls.WINNER_MIN_IMPRESSIONS:
             return None, "insufficient_data"
 
-        max_ctr = max((variant.ctr for variant in candidates), default=0.0)
-        proxy_target = max(round(cls.WINNER_MIN_IMPRESSIONS * 0.03), 1)
-        max_click_signal = max((min(variant.clicks / proxy_target, 1.0) for variant in candidates), default=0.0)
-
-        def score(variant: ABTestVariant) -> float:
-            ctr_score = variant.ctr / max_ctr if max_ctr else 0.0
-            click_signal = min(variant.clicks / proxy_target, 1.0)
-            click_score = click_signal / max_click_signal if max_click_signal else 0.0
-            confidence = min(variant.views / cls.WINNER_MIN_IMPRESSIONS, 1.0)
-            return 0.55 * ctr_score + 0.25 * click_score + 0.20 * confidence
-
-        ranked = sorted(candidates, key=lambda variant: (score(variant), variant.ctr, variant.views, variant.clicks, -variant.position), reverse=True)
+        ranked = sorted(candidates, key=lambda variant: (variant.ctr, -variant.position), reverse=True)
         winner, runner_up = ranked[0], ranked[1]
-        ctr_delta = abs(winner.ctr - runner_up.ctr)
-        score_delta = abs(score(winner) - score(runner_up))
-        if ctr_delta < cls.WINNER_MIN_CTR_DELTA or score_delta < cls.WINNER_MIN_SCORE_DELTA:
+        if winner.ctr - runner_up.ctr < cls.WINNER_MIN_CTR_DELTA:
             return None, "no_clear_winner"
         return winner, "winner_found"
 
@@ -1930,17 +2087,83 @@ class ABTestService:
             details += f" {self._safe_error(restore_error)}"
             test.last_error = details[:2000]
             raise ABTestReconciliationRequired(details, incident_id=test.incident_id) from restore_error
+
+        winner_media_error: Exception | None = None
+        if winner and test.keep_winner_as_main:
+            try:
+                # Restore first, then apply the selected creative as the final
+                # main image. The upload response is authoritative; the
+                # service deliberately does not add a digest/fingerprint or
+                # CDN read-back check to this flow.
+                await self._apply_variant(test, winner, content)
+            except Exception as exc:
+                winner_media_error = exc
+                try:
+                    await self._restore_original(test, content, allow_pending=True)
+                except Exception as restore_after_winner_error:
+                    winner_media_error = RuntimeError(
+                        f"{self._safe_error(exc)}; восстановление после установки победителя: "
+                        f"{self._safe_error(restore_after_winner_error)}"
+                    )
+        if winner_media_error:
+            test.status = ABTestStatus.FAILED
+            test.finished_at = self._now()
+            test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            test.incident_id = test.incident_id or self._incident_id()
+            details = (
+                f"Кампания остановлена, но победившее фото не удалось установить. Инцидент {test.incident_id}. "
+                f"{self._safe_error(winner_media_error)}"
+            )
+            test.last_error = details[:2000]
+            raise ABTestReconciliationRequired(details, incident_id=test.incident_id) from winner_media_error
         test.status = ABTestStatus.STOPPED if stopped else ABTestStatus.FINISHED
         test.finished_at = self._now()
         test.operation_state = ABTestOperationStatus.SUCCEEDED.value
-        test.media_status = "restored"
+        test.media_status = "winner_applied" if winner and test.keep_winner_as_main else "restored"
         test.last_error = None
+        if test.delete_test_media:
+            self._cleanup_media_artifacts(test)
+
+    def _cleanup_media_artifacts(self, test: ABTest) -> None:
+        """Remove rollback/shadow files after a safe external finish.
+
+        Uploaded creatives remain available as result evidence in the UI. The
+        files removed here are the original-card backups and swap shadows,
+        which are no longer needed after campaign stop, restoration, and the
+        optional winner application have all succeeded. Failed or
+        reconciliation-required tests never reach this method, so rollback
+        data remains available for recovery.
+        """
+        state = self._media_state(test)
+        paths = set(self._media_state_paths(state))
+        if test.original_main_backup_path:
+            paths.add(test.original_main_backup_path)
+        cleanup_errors: list[str] = []
+        for relative_path in paths:
+            try:
+                self._state_file(str(relative_path)).unlink(missing_ok=True)
+            except (OSError, RuntimeError) as exc:
+                cleanup_errors.append(str(relative_path))
+                logger.warning(
+                    "A/B local media cleanup failed test_id=%s path=%s error=%s",
+                    test.id,
+                    relative_path,
+                    exc,
+                )
+        state["cleanup"] = "completed" if not cleanup_errors else "partial"
+        state["cleanup_errors"] = cleanup_errors
+        state["backups"] = {}
+        state["shadows"] = {}
+        state["pending"] = None
+        state["touched"] = []
+        test.original_main_backup_path = None
+        test.media_state = state
 
     async def stop(self, user_id: int, test_id: int) -> ABTest:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -2075,7 +2298,7 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -2144,11 +2367,77 @@ class ABTestService:
                 raise self._api_error(exc) from exc
         return await self.repository.get_for_user(user_id, test_id)  # type: ignore[return-value]
 
+    async def recover_unfinished_operations(self) -> None:
+        """Mark crash-interrupted external operations without replaying them.
+
+        This runs after a process restart. An operation row may have been
+        committed before the process died, while the corresponding WB request
+        was already on the network. Replaying it could duplicate a campaign or
+        a deposit, so recovery only classifies the state and leaves external
+        verification to the explicit reconcile action.
+        """
+        operations = await self.repository.list_reconciliation_operations()
+        changed = False
+        for operation in operations:
+            test = await self.repository.get_for_update(operation.user_id, operation.test_id)
+            if not test:
+                continue
+            phase = (operation.response_snapshot or {}).get("phase")
+            operation_status = operation.status.value if isinstance(operation.status, ABTestOperationStatus) else str(operation.status)
+            safely_prepared = (
+                operation_status == ABTestOperationStatus.PREPARED.value
+                and not test.wb_campaign_id
+                and test.campaign_state == "not_created"
+                and phase in {None, "preparing_card"}
+            )
+            if safely_prepared:
+                operation.status = ABTestOperationStatus.FAILED
+                operation.last_error = "Операция подготовки прервана перезапуском сервиса; внешних действий не повторяли."
+                test.status = ABTestStatus.DRAFT
+                test.operation_state = ABTestOperationStatus.FAILED.value
+                test.last_error = "Подготовка запуска прервалась после перезапуска сервиса. Повторите запуск с новым подтверждением."
+                changed = True
+                continue
+
+            # Any campaign ID, create/start phase, or in-progress operation is
+            # potentially visible in WB. Keep the test blocked until a user
+            # explicitly reconciles the existing campaign and media state.
+            recovery_error = "Операция была прервана перезапуском сервиса; требуется сверка без повтора внешнего запроса."
+            previous_incident = test.incident_id
+            previous_error = test.last_error
+            previous_status = operation.status
+            previous_operation_error = operation.last_error
+            previous_test_status = test.status
+            previous_operation_state = test.operation_state
+            if operation.status != ABTestOperationStatus.RECONCILIATION_REQUIRED:
+                operation.status = ABTestOperationStatus.RECONCILIATION_REQUIRED
+            operation.last_error = recovery_error
+            test.status = ABTestStatus.FAILED
+            test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            test.incident_id = test.incident_id or self._incident_id()
+            recovery_message = (
+                f"Операция запуска прервана после перезапуска сервиса. Повтор запрещён до сверки. "
+                f"Инцидент {test.incident_id}."
+            )[:2000]
+            test.last_error = recovery_message
+            changed = changed or any(
+                (
+                    previous_status != operation.status,
+                    previous_operation_error != recovery_error,
+                    previous_test_status != ABTestStatus.FAILED,
+                    previous_operation_state != ABTestOperationStatus.RECONCILIATION_REQUIRED.value,
+                    previous_incident != test.incident_id,
+                    previous_error != recovery_message,
+                )
+            )
+        if changed:
+            await self.db.commit()
+
     async def sync(self, user_id: int, test_id: int) -> ABTest:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -2176,25 +2465,56 @@ class ABTestService:
         if totals is None:
             async with self._stats_operation_lock(test.connection_id):
                 totals = await promotion.fullstats(test.wb_campaign_id, started_at=started_at)
+
+        # Newer WB client responses carry presence metadata. Keep backwards
+        # compatibility with test doubles and older cached responses that only
+        # contain numeric totals.
+        available = totals.get("_available_metrics") if isinstance(totals, dict) else None
+        if not isinstance(available, dict):
+            available = {
+                "views": "views" in totals,
+                "clicks": "clicks" in totals,
+                "orders": "orders" in totals,
+                "sum": "sum" in totals,
+            }
+        has_data = bool(totals.get("_has_data", any(available.values())))
+        if not has_data:
+            test.stats_quality = "no_data"
+            test.last_synced_at = self._now()
+            return
+        # The spend ceiling cannot be enforced when WB omits the spend
+        # metric. Keep the experiment on the current stage until a complete
+        # snapshot arrives instead of silently serving beyond the approved
+        # budget.
+        if not available.get("views") or not available.get("clicks") or not available.get("sum"):
+            test.stats_quality = "incomplete"
+            test.last_synced_at = self._now()
+            return
+
         raw_views = int(totals.get("views", 0))
         raw_clicks = int(totals.get("clicks", 0))
-        raw_orders = int(totals.get("orders", 0))
-        raw_spend = float(totals.get("sum", 0))
+        raw_orders = int(totals.get("orders", 0)) if available.get("orders") else None
+        raw_spend = float(totals.get("sum", 0)) if available.get("sum") else None
         previous_views = int(test.last_total_views or 0)
         previous_clicks = int(test.last_total_clicks or 0)
         previous_orders = int(getattr(test, "last_total_orders", 0) or 0)
         previous_spend = float(test.last_total_spend_rub or 0)
         if (
-            raw_views < previous_views
+            raw_views < 0
+            or raw_clicks < 0
+            or (raw_orders is not None and raw_orders < 0)
+            or (raw_spend is not None and raw_spend < 0)
+            or raw_views < previous_views
             or raw_clicks < previous_clicks
-            or raw_orders < previous_orders
-            or raw_spend < previous_spend
+            or (raw_orders is not None and raw_orders < previous_orders)
+            or (raw_spend is not None and raw_spend < previous_spend)
         ):
             test.stats_quality = "reconciliation_required"
             test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
             test.incident_id = test.incident_id or self._incident_id()
             test.last_error = (
-                f"Статистика WB уменьшилась или изменилась задним числом. Данные сохранены до сверки. "
+                f"Статистика WB содержит отрицательное значение или уменьшилась задним числом. "
+                f"Данные сохранены до сверки. "
                 f"Инцидент {test.incident_id}."
             )[:2000]
             return
@@ -2207,11 +2527,11 @@ class ABTestService:
             test.incident_id = None
         views = raw_views
         clicks = raw_clicks
-        spend = raw_spend
+        spend = raw_spend if raw_spend is not None else previous_spend
         delta_views = views - previous_views
-        delta_clicks = max(clicks - previous_clicks, 0)
-        delta_orders = max(raw_orders - previous_orders, 0)
-        delta_spend = max(spend - previous_spend, 0)
+        delta_clicks = clicks - previous_clicks
+        delta_orders = raw_orders - previous_orders if raw_orders is not None else 0
+        delta_spend = spend - previous_spend if raw_spend is not None else 0.0
         current = self._variant_by_position(test, test.current_variant_order)
         if current:
             # fullstats is campaign-level data, not photo-level attribution.
@@ -2231,9 +2551,43 @@ class ABTestService:
             test.stats_quality = "aggregate_unverified"
         test.last_total_views = views
         test.last_total_clicks = clicks
-        test.last_total_orders = raw_orders
-        test.last_total_spend_rub = spend
+        if raw_orders is not None:
+            test.last_total_orders = raw_orders
+        if raw_spend is not None:
+            test.last_total_spend_rub = spend
         test.last_synced_at = self._now()
+
+        # A successful but permanently empty stats response is different from
+        # a temporary API error. Bound a test with no impressions so it cannot
+        # keep a paid campaign alive forever without measurable progress.
+        no_progress_timeout = max(
+            int(getattr(settings, "ab_test_no_progress_timeout_sec", 172800) or 172800),
+            self.MIN_NO_PROGRESS_TIMEOUT_SECONDS,
+        )
+        if current and current.views <= 0 and test.started_at:
+            started_at = test.started_at
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=timezone.utc)
+            if (self._now() - started_at).total_seconds() >= no_progress_timeout:
+                await self._finish_loaded(test, content, promotion, stopped=True)
+                test.last_error = (
+                    f"Тест остановлен: за {no_progress_timeout // 3600} ч. не получено ни одного показа. "
+                    "Проверьте доступность товара и настройки кампании перед повторным запуском."
+                )[:2000]
+                return
+
+        # Treat the approved test budget as a hard safety ceiling. WB can
+        # return delayed spend totals, so this is intentionally checked before
+        # any next-photo mutation; it prevents the scheduler from knowingly
+        # extending a test after the agreed amount is reached.
+        spend_limit = float(test.budget_rub or 0)
+        if current and spend_limit > 0 and spend >= spend_limit:
+            await self._finish_loaded(test, content, promotion, stopped=True)
+            test.last_error = (
+                f"Тест остановлен: достигнут согласованный лимит расходов {int(spend_limit)} ₽. "
+                f"Фактический расход по данным WB — {int(round(spend))} ₽."
+            )[:2000]
+            return
 
         required_views = int(test.views_per_variant or 0)
         if current and required_views > 0 and current.views >= required_views:
@@ -2248,6 +2602,55 @@ class ABTestService:
                 if not next_variant:
                     raise RuntimeError(f"Не найден вариант {next_position}")
                 try:
+                    minimum_bid = None
+                    get_min_bid = getattr(promotion, "get_min_bid", None)
+                    if callable(get_min_bid):
+                        minimum_bid = await get_min_bid(
+                            campaign_id=test.wb_campaign_id,
+                            nm_id=test.nm_id,
+                            placement=test.placement,
+                            bid_type=test.bid_type,
+                        )
+                        if minimum_bid is None or minimum_bid < 1:
+                            raise RuntimeError("Wildberries не вернул актуальную минимальную ставку. Переключение заблокировано.")
+                    if minimum_bid is not None and int(minimum_bid) > int(test.cpm_rub):
+                        # Pause before the next paid stage. Restore the card so
+                        # a later resume starts from a known original state and
+                        # reuses the existing campaign ID.
+                        await self._stop_campaign_confirmed(test, promotion)
+                        await self._restore_original(test, content, allow_pending=True)
+                        test.cpm_rub = int(minimum_bid)
+                        tested_variant_count = len(
+                            [variant for variant in test.variants if variant.source_type != "control"]
+                        ) + (0 if test.skip_current_photo else 1)
+                        test.budget_rub = calculate_required_budget(
+                            tested_variant_count,
+                            test.views_per_variant,
+                            minimum_bid,
+                        )
+                        test.status = ABTestStatus.DRAFT
+                        test.started_at = None
+                        test.finished_at = None
+                        test.current_variant_order = 0
+                        test.winner_variant_order = None
+                        test.winner_decision = None
+                        test.operation_state = ABTestOperationStatus.SUCCEEDED.value
+                        test.campaign_state = "stopped"
+                        test.media_status = "restored"
+                        test.incident_id = None
+                        test.last_error = (
+                            f"Тест приостановлен: минимальная ставка Wildberries выросла до {int(minimum_bid)} ₽. "
+                            "CPM и необходимый бюджет пересчитаны. Подтвердите продолжение — будет использована эта же кампания."
+                        )[:2000]
+                        latest_operation = await self.repository.get_latest_operation(test.id)
+                        if latest_operation:
+                            latest_operation.response_snapshot = {
+                                "phase": "paused_minimum_bid",
+                                "campaign_id": int(test.wb_campaign_id),
+                                "minimum_cpm": int(minimum_bid),
+                                "recalculated_budget": int(test.budget_rub),
+                            }
+                        return
                     # Keep the existing WB campaign serving while the content
                     # API changes the main slot. This is the same sequence as
                     # the reference WB Optimizer project. Calling
@@ -2405,9 +2808,14 @@ class ABTestService:
         }
 
     async def scheduler_tick(self) -> None:
+        await self.recover_unfinished_operations()
         tests = await self.repository.list_running()
         for test in tests:
-            async with self._operation_lock(test.connection_id, test.nm_id):
+            # ``test`` is the snapshot returned by list_running; the locked
+            # row is loaded only after the advisory lock is acquired. Using
+            # ``locked_test`` here caused every scheduler tick to fail before
+            # it could synchronize a single running test.
+            async with self._operation_lock(test.connection_id, test.nm_id, test.user_id):
                 locked_test = await self.repository.get_for_update(test.user_id, test.id)
                 if not locked_test or locked_test.status != ABTestStatus.RUNNING:
                     continue

@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -92,14 +93,27 @@ class AuthService:
             user.last_name = last_name.strip()
             user.is_active = True
         else:
-            user = await self.users.create(
-                email=normalized_email,
-                hashed_password=hash_password(password),
-                first_name=first_name.strip(),
-                last_name=last_name.strip(),
-                is_verified=False,
-                is_active=True,
-            )
+            try:
+                user = await self.users.create(
+                    email=normalized_email,
+                    hashed_password=hash_password(password),
+                    first_name=first_name.strip(),
+                    last_name=last_name.strip(),
+                    is_verified=False,
+                    is_active=True,
+                )
+            except IntegrityError as exc:
+                # Two browser clicks can pass the read-before-create check at
+                # the same time. Convert the unique-key race into a clear,
+                # retryable registration response instead of leaking a 500.
+                await self.db.rollback()
+                existing = await self.users.get_by_email(normalized_email)
+                if existing and existing.is_verified:
+                    raise HTTPException(status_code=409, detail="Аккаунт с этой электронной почтой уже существует") from exc
+                raise HTTPException(
+                    status_code=409,
+                    detail="Регистрация с этой почтой уже начата. Используйте отправленный код подтверждения или запросите новый.",
+                ) from exc
 
         return await self._send_verification_code(user)
 

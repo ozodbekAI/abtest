@@ -7,8 +7,7 @@ import { StoreSwitcher } from '../components/StoreSwitcher';
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
 import type { DashboardStats, WBConnection } from '../types';
-
-const ACTIVE_STORE_KEY = 'wb_optimizer_active_store_id';
+import { publishActiveStoreId, readActiveStoreId, subscribeActiveStoreId } from '../utils/activeStore';
 const PERIODS = [['today', 'Сегодня'], ['week', '7 дней'], ['month', '30 дней'], ['custom', 'Период']] as const;
 function formatNumber(value: number) { return new Intl.NumberFormat('ru-RU').format(Math.round(value || 0)); }
 function formatRub(value: number) { return `${new Intl.NumberFormat('ru-RU').format(Math.round(value || 0))} ₽`; }
@@ -20,8 +19,7 @@ export function DashboardPage() {
   const { user } = useAuth();
   const [connections, setConnections] = useState<WBConnection[]>([]);
   const [activeConnectionId, setActiveConnectionId] = useState<number | null>(() => {
-    const storedId = Number(localStorage.getItem(ACTIVE_STORE_KEY));
-    return Number.isInteger(storedId) && storedId > 0 ? storedId : null;
+    return readActiveStoreId();
   });
   const [loading, setLoading] = useState(true);
   const [validating, setValidating] = useState(false);
@@ -47,14 +45,13 @@ export function DashboardPage() {
     try {
       const result = await api.getWBConnections();
       setConnections(result);
-      const storedId = Number(localStorage.getItem(ACTIVE_STORE_KEY));
-      const selected = result.find((item) => item.id === storedId) || result[0];
+      const selected = result.find((item) => item.id === readActiveStoreId()) || result[0];
       if (selected) {
         setActiveConnectionId(selected.id);
-        localStorage.setItem(ACTIVE_STORE_KEY, String(selected.id));
+        publishActiveStoreId(selected.id);
       } else {
         setActiveConnectionId(null);
-        localStorage.removeItem(ACTIVE_STORE_KEY);
+        publishActiveStoreId(null);
       }
       setStatsRefresh((value) => value + 1);
     } catch (error: any) {
@@ -65,6 +62,7 @@ export function DashboardPage() {
   };
 
   useEffect(() => { void load(); }, []);
+  useEffect(() => subscribeActiveStoreId((id) => setActiveConnectionId(id)), []);
   useEffect(() => {
     // Dashboard uses only local experiment totals. An optional WB permission
     // refresh must not hide already saved A/B-test results.
@@ -84,7 +82,7 @@ export function DashboardPage() {
 
   const selectConnection = (connectionId: number) => {
     setActiveConnectionId(connectionId);
-    localStorage.setItem(ACTIVE_STORE_KEY, String(connectionId));
+    publishActiveStoreId(connectionId);
   };
 
   const replaceConnection = (updated: WBConnection) => {

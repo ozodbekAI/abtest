@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import struct
+from contextlib import asynccontextmanager
 
 import pytest
 from fastapi import HTTPException
@@ -28,6 +29,15 @@ def test_winner_requires_a_real_sample() -> None:
     assert decision == "insufficient_data"
 
 
+def test_experiment_variant_count_is_limited_to_two_to_five_images() -> None:
+    assert ABTestService._validate_test_variant_count(2, skip_current_photo=True) == 2
+    assert ABTestService._validate_test_variant_count(4, skip_current_photo=False) == 5
+    with pytest.raises(HTTPException, match="минимум 2"):
+        ABTestService._validate_test_variant_count(1, skip_current_photo=True)
+    with pytest.raises(HTTPException, match="от 2 до 5"):
+        ABTestService._validate_test_variant_count(5, skip_current_photo=False)
+
+
 def test_winner_rejects_a_tie() -> None:
     test = make_test((1, 500, 20), (2, 500, 21))
     winner, decision = ABTestService._winner_result(test)
@@ -41,6 +51,36 @@ def test_winner_selects_a_clear_variant() -> None:
     assert winner is not None
     assert winner.position == 2
     assert decision == "winner_found"
+
+
+def test_winner_uses_ctr_only() -> None:
+    # Variant 1 has the higher CTR. Variant 2 has more clicks and impressions,
+    # which must not override the product's CTR-only decision.
+    test = make_test((1, 300, 5), (2, 900, 9))
+    winner, decision = ABTestService._winner_result(test)
+    assert winner is not None
+    assert winner.position == 1
+    assert decision == "winner_found"
+
+
+def test_current_main_photo_can_participate_when_not_skipped() -> None:
+    test = ABTest(skip_current_photo=False)
+    test.variants = [
+        ABTestVariant(position=0, source_type="control", views=500, clicks=20),
+        ABTestVariant(position=1, source_type="upload", views=500, clicks=10),
+    ]
+    winner, decision = ABTestService._winner_result(test)
+    assert winner is not None
+    assert winner.position == 0
+    assert decision == "winner_found"
+
+
+def test_winner_is_not_inferred_from_aggregate_campaign_stats() -> None:
+    test = make_test((1, 1000, 40), (2, 1000, 20))
+    test.stats_quality = "aggregate_unverified"
+    winner, decision = ABTestService._winner_result(test)
+    assert winner is None
+    assert decision == "statistics_not_attributable"
 
 
 def test_content_page_preserves_wb_cursor(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,10 +126,46 @@ def test_tiff_is_converted_to_wb_compatible_jpeg() -> None:
     assert ABTestService._image_dimensions(converted) == (700, 900)
 
 
+def test_finished_test_cleanup_removes_only_rollback_artifacts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    backup = tmp_path / "ab_tests" / "70" / "original" / "slot_1.jpg"
+    shadow = tmp_path / "ab_tests" / "70" / "current" / "slot_1.jpg"
+    creative = tmp_path / "ab_tests" / "70" / "1_upload.jpg"
+    backup.parent.mkdir(parents=True)
+    shadow.parent.mkdir(parents=True)
+    backup.write_bytes(b"backup")
+    shadow.write_bytes(b"shadow")
+    creative.write_bytes(b"result")
+
+    service = ABTestService(None)  # type: ignore[arg-type]
+    monkeypatch.setattr(ABTestService, "_media_root", staticmethod(lambda: tmp_path))
+    test = ABTest(id=70, delete_test_media=True, original_main_backup_path="ab_tests/70/original/slot_1.jpg")
+    test.media_state = {
+        "version": 1,
+        "backups": {"1": {"path": "ab_tests/70/original/slot_1.jpg"}},
+        "shadows": {"1": {"path": "ab_tests/70/current/slot_1.jpg"}},
+    }
+    test.variants = [ABTestVariant(position=1, source_type="upload", file_path="ab_tests/70/1_upload.jpg")]
+
+    service._cleanup_media_artifacts(test)
+
+    assert not backup.exists()
+    assert not shadow.exists()
+    assert creative.exists()
+    assert test.original_main_backup_path is None
+    assert test.media_state["cleanup"] == "completed"
+
+
 def _valid_png(marker: bytes = b"") -> bytes:
-    data = bytearray(b"\x89PNG\r\n\x1a\n" + b"\x00" * 16 + marker)
-    data[16:24] = struct.pack(">II", 700, 900)
-    return bytes(data)
+    from PIL import Image
+
+    color = tuple(hashlib.sha256(marker).digest()[:3])
+    source = Image.new("RGB", (700, 900), color)
+    raw = io.BytesIO()
+    source.save(raw, format="PNG")
+    return raw.getvalue()
 
 
 def test_apply_variant_uses_upload_success_without_card_readback(
@@ -343,6 +419,20 @@ def test_promotion_count_parses_wb_flat_status_id(monkeypatch: pytest.MonkeyPatc
     ]
 
 
+def test_campaign_details_extracts_product_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = WBPromotionClient("campaign-details-test-token")
+
+    async def fake_request(method: str, path: str, **kwargs: object) -> dict[str, object]:
+        assert method == "GET"
+        assert path == "/api/advert/v2/adverts"
+        assert kwargs["params"] == {"ids": "459"}
+        return {"adverts": [{"id": 459, "nm_settings": [{"nm_id": 123}, {"nm_id": 456}]}]}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    details = asyncio.run(client.get_campaign_details(459))
+    assert WBPromotionClient.campaign_nm_ids(details) == {123, 456}
+
+
 def test_unified_campaign_omits_manual_placement_types(monkeypatch: pytest.MonkeyPatch) -> None:
     client = WBPromotionClient("unified-create-test-token")
     calls: list[tuple[str, str, dict]] = []
@@ -380,6 +470,42 @@ def test_unified_minimum_bid_requests_combined(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(client, "_request", fake_request)
     assert asyncio.run(client.get_min_bid(campaign_id=123456, nm_id=987, placement="search")) == 405
     assert calls[0][2]["json"]["placement_types"] == ["combined"]
+
+
+def test_minimum_bid_rejects_unknown_units(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = WBPromotionClient("unknown-unit-test-token")
+
+    async def fake_request(method: str, path: str, **kwargs):
+        return {"bids": [{"nm_id": 987, "bids": [{"type": "combined", "value": 40500, "unit": "mills"}]}]}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    with pytest.raises(WBApiError, match="неизвестных единицах"):
+        asyncio.run(client.get_min_bid(campaign_id=123456, nm_id=987))
+
+
+def test_fullstats_honors_provider_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = WBPromotionClient("retry-after-test-token")
+    client.__class__._stats_locks.clear()
+    client.__class__._last_stats_at.clear()
+    client.__class__._stats_cache.clear()
+    sleeps: list[float] = []
+    calls = 0
+
+    async def fake_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    async def fake_request(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise WBApiError("rate limited", status_code=429, retry_after=90)
+        return [{"advertId": 123, "views": 10, "clicks": 1, "sum": 2}]
+
+    monkeypatch.setattr("app.services.wb_promotion_client.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(client, "_request", fake_request)
+    result = asyncio.run(client.fullstats(123))
+    assert result["views"] == 10
+    assert sleeps[0] == 90
 
 
 def test_unified_bid_update_forces_combined_placement(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -498,16 +624,16 @@ def test_budget_deposit_does_not_call_deposit_without_available_funding(monkeypa
     assert [path for _, path, _ in calls] == ["/adv/v1/balance"]
 
 
-def test_thirty_variants_have_a_budget_floor() -> None:
-    variants = 30
+def test_five_variants_have_an_explicit_budget() -> None:
+    variants = 5
     views_per_variant = 1_000
     cpm_rub = 300
-    assert calculate_required_budget(variants, views_per_variant, cpm_rub) == 9_900
+    assert calculate_required_budget(variants, views_per_variant, cpm_rub) == 1_500
 
 
-def test_budget_matches_wb_optimizer_floor_and_buffer() -> None:
+def test_budget_matches_wb_floor_without_hidden_buffer() -> None:
     assert calculate_required_budget(3, 1_000, 300) == 1_200
-    assert calculate_required_budget(5, 1_000, 250) == 1_400
+    assert calculate_required_budget(5, 1_000, 250) == 1_300
 
 
 def test_safe_error_keeps_minimum_cpm_message_readable() -> None:
@@ -1053,3 +1179,47 @@ def test_sync_switch_keeps_existing_campaign_running(
     monkeypatch.setattr(ABTestService, "_clients", fake_clients)
     monkeypatch.setattr(ABTestService, "_apply_variant", fake_apply)
     asyncio.run(run())
+
+
+def test_scheduler_uses_listed_test_owner_before_loading_locked_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A scheduler tick must not reference the locked row before loading it."""
+
+    class FakeDB:
+        async def commit(self):
+            return None
+
+    snapshot = ABTest(id=60, user_id=17, connection_id=3, nm_id=123, status=ABTestStatus.RUNNING)
+    locked = ABTest(id=60, user_id=17, connection_id=3, nm_id=123, status=ABTestStatus.RUNNING)
+    seen: list[int] = []
+
+    class FakeRepository:
+        async def list_reconciliation_operations(self):
+            return []
+
+        async def list_running(self):
+            return [snapshot]
+
+        async def get_for_update(self, user_id: int, test_id: int):
+            assert user_id == 17
+            assert test_id == 60
+            return locked
+
+    @asynccontextmanager
+    async def fake_lock(self, connection_id: int, nm_id: int, user_id: int | None = None):
+        assert (connection_id, nm_id, user_id) == (3, 123, 17)
+        yield
+
+    async def fake_sync(self, test):
+        seen.append(test.id)
+
+    async def run() -> None:
+        service = ABTestService(FakeDB())  # type: ignore[arg-type]
+        service.repository = FakeRepository()  # type: ignore[assignment]
+        await service.scheduler_tick()
+
+    monkeypatch.setattr(ABTestService, "_operation_lock", fake_lock)
+    monkeypatch.setattr(ABTestService, "_sync_loaded", fake_sync)
+    asyncio.run(run())
+    assert seen == [60]

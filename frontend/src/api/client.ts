@@ -1,4 +1,4 @@
-import type { ABTest, ABTestCard, ABTestCardCursor, ABTestCardsPage, ABTestCreatePayload, AdminDashboard, AdminSettings, AdminStoreDetail, AdminStoreItem, AdminUserDetail, AdminUserItem, DashboardStats, TokenResponse, User, WBConnection, WBPromotionBalance } from '../types';
+import type { ABTest, ABTestCard, ABTestCardCursor, ABTestCardsPage, ABTestCreatePayload, AdminAuditItem, AdminDashboard, AdminSettings, AdminStoreDetail, AdminStoreItem, AdminUserDetail, AdminUserItem, DashboardStats, TokenResponse, User, WBConnection, WBPromotionBalance } from '../types';
 
 const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:8000/api').replace(/\/$/, '');
 const ACCESS_KEY = 'wb_optimizer_access_token';
@@ -16,7 +16,7 @@ export class ApiError extends Error {
   }
 }
 
-function getAccessToken() {
+export function getStoredAccessToken() {
   return localStorage.getItem(ACCESS_KEY);
 }
 
@@ -98,7 +98,7 @@ async function refreshTokensOnce(): Promise<boolean> {
 async function request<T>(path: string, init: RequestInit = {}, canRefresh = true): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) headers.set('Content-Type', 'application/json');
-  const token = getAccessToken();
+  const token = getStoredAccessToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
   const response = await fetch(`${API_URL}${path}`, { ...init, headers });
@@ -161,6 +161,7 @@ export const api = {
   getAdminStore: (storeId: number) => request<AdminStoreDetail>(`/admin/stores/${storeId}`),
   getAdminSettings: () => request<AdminSettings>('/admin/settings'),
   updateAdminSettings: (registration_enabled: boolean) => request<AdminSettings>('/admin/settings', { method: 'PATCH', body: JSON.stringify({ registration_enabled }) }),
+  getAdminAudit: (limit = 100) => request<{ items: AdminAuditItem[]; total: number }>(`/admin/audit?limit=${limit}`),
   getWBConnections: () => request<WBConnection[]>('/wb/connections'),
   getDashboardStats: (connectionId: number, period = 'today', beginDate?: string, endDate?: string) => {
     const params = new URLSearchParams({ connection_id: String(connectionId), period });

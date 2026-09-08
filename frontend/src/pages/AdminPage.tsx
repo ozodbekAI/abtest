@@ -5,12 +5,12 @@ import { toast } from 'sonner';
 import { AppShell } from '../components/AppShell';
 import { api } from '../api/client';
 import { useAuth } from '../contexts/AuthContext';
-import type { AdminDashboard, AdminSettings, AdminStoreDetail, AdminStoreItem, AdminTestItem, AdminUserDetail, AdminUserItem } from '../types';
+import type { AdminAuditItem, AdminDashboard, AdminSettings, AdminStoreDetail, AdminStoreItem, AdminTestItem, AdminUserDetail, AdminUserItem } from '../types';
 
-type AdminTab = 'overview' | 'users' | 'stores' | 'settings';
+type AdminTab = 'overview' | 'users' | 'stores' | 'settings' | 'audit';
 
 function isAdminTab(value: string | null): value is AdminTab {
-  return value === 'overview' || value === 'users' || value === 'stores' || value === 'settings';
+  return value === 'overview' || value === 'users' || value === 'stores' || value === 'settings' || value === 'audit';
 }
 
 const emptyCreateForm = { email: '', password: '', confirm_password: '', first_name: '', last_name: '', is_verified: true, is_active: true, is_admin: false };
@@ -30,6 +30,7 @@ export function AdminPage() {
   const [usersTotal, setUsersTotal] = useState(0);
   const [stores, setStores] = useState<AdminStoreItem[]>([]);
   const [settings, setSettings] = useState<AdminSettings | null>(null);
+  const [audit, setAudit] = useState<AdminAuditItem[]>([]);
   const [search, setSearch] = useState('');
   const [userPage, setUserPage] = useState(1);
   const [loading, setLoading] = useState(true);
@@ -57,6 +58,15 @@ export function AdminPage() {
       setUsersTotal(userResult.total);
       setStores(storesResult);
       setSettings(settingsResult);
+      try {
+        const auditResult = await api.getAdminAudit();
+        setAudit(auditResult.items);
+      } catch (auditError) {
+        // The audit table is introduced by 0012. Keep the rest of the
+        // admin panel usable while an existing deployment is being migrated.
+        console.warn('Admin audit log is unavailable until migration 0012 is applied', auditError);
+        setAudit([]);
+      }
     } catch (error: any) {
       toast.error(error?.message || 'Не удалось загрузить данные админ-панели');
     } finally {
@@ -134,6 +144,7 @@ export function AdminPage() {
     ['users', 'Пользователи', Users],
     ['stores', 'Магазины и тесты', Store],
     ['settings', 'Глобальные настройки', Settings2],
+    ['audit', 'Журнал действий', Activity],
   ];
 
   return <AppShell>
@@ -145,6 +156,7 @@ export function AdminPage() {
         {tab === 'users' && <AdminUsers users={users} currentUserId={user?.id} total={usersTotal} page={userPage} search={search} setSearch={setSearch} onSearch={searchUsers} onPageChange={setUserPage} onCreate={() => setShowCreate(true)} onOpen={openUser} />}
         {tab === 'stores' && <AdminStores stores={stores} onOpen={openStore} />}
         {tab === 'settings' && <AdminSettingsPanel settings={settings} busy={settingsBusy} onRegistrationChange={updateRegistration} />}
+        {tab === 'audit' && <AdminAuditPanel items={audit} />}
       </>}
     </div>
     {showCreate && <CreateUserModal form={createForm} setForm={setCreateForm} busy={createBusy} onSubmit={createUser} onClose={() => setShowCreate(false)} />}
@@ -174,6 +186,14 @@ function AdminUsers({ users, currentUserId, total, page, search, setSearch, onSe
 
 function AdminStores({ stores, onOpen }: { stores: AdminStoreItem[]; onOpen: (store: AdminStoreItem) => void }) {
   return <section className="admin-table-card"><div className="admin-section-toolbar"><div><span className="settings-kicker">ПОДКЛЮЧЕНИЯ</span><h2>Магазины Wildberries <small>{number(stores.length)}</small></h2><p>Состояние подключений и A/B-тесты владельцев.</p></div><Link to="/settings" className="outline-button"><Store size={16} /> Настройки магазинов</Link></div><div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Магазин</th><th>Владелец</th><th>Доступ</th><th>Тесты</th><th>Токен</th><th>Проверка</th><th /></tr></thead><tbody>{stores.length ? stores.map((item) => <tr key={item.id}><td><div className="admin-store-cell"><span className="admin-store-icon"><Store size={15} /></span><strong>{item.store_name}</strong></div></td><td><span className="admin-owner"><strong>{item.owner_name}</strong><small>{item.owner_email}</small></span></td><td><span className={`admin-status ${item.ready_for_ab_tests ? 'active' : 'blocked'}`}><i />{item.ready_for_ab_tests ? 'Готов' : 'Проверить'}</span></td><td>{number(item.tests_count)}</td><td>••••{item.token_last4}</td><td>{dateTime(item.last_validated_at)}</td><td><button className="table-action" onClick={() => onOpen(item)} aria-label="Открыть магазин"><ChevronRight size={17} /></button></td></tr>) : <tr><td colSpan={7}><div className="admin-empty"><Store size={22} /><strong>Магазинов пока нет</strong><span>Подключения появятся после добавления токена.</span></div></td></tr>}</tbody></table></div></section>;
+}
+
+function AdminAuditPanel({ items }: { items: AdminAuditItem[] }) {
+  return <section className="admin-table-card"><div className="admin-section-toolbar"><div><span className="settings-kicker">КОНТРОЛЬ</span><h2>Журнал действий</h2><p>Кто, когда и какое административное изменение выполнил.</p></div><Activity size={22} /></div><div className="admin-table-wrap"><table className="admin-table"><thead><tr><th>Дата</th><th>Администратор</th><th>Действие</th><th>Объект</th><th>Изменение</th></tr></thead><tbody>{items.length ? items.map((item) => <tr key={item.id}><td>{dateTime(item.created_at)}</td><td>{item.actor_email}</td><td>{auditActionLabel(item.action)}</td><td>{item.target_type}{item.target_id ? ` #${item.target_id}` : ''}</td><td><strong>{item.summary}</strong></td></tr>) : <tr><td colSpan={5}><div className="admin-empty"><Activity size={22} /><strong>Записей пока нет</strong><span>Административные изменения появятся здесь.</span></div></td></tr>}</tbody></table></div></section>;
+}
+
+function auditActionLabel(action: string) {
+  return ({ user_created: 'Создание пользователя', user_updated: 'Изменение пользователя', user_password_changed: 'Смена пароля', user_deleted: 'Удаление пользователя', registration_setting_changed: 'Глобальная настройка' } as Record<string, string>)[action] || action;
 }
 
 function AdminSettingsPanel({ settings, busy, onRegistrationChange }: { settings: AdminSettings | null; busy: boolean; onRegistrationChange: (enabled: boolean) => void }) {

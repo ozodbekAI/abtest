@@ -5,6 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
+from app.models.admin_audit import AdminAuditLog
 from app.models.user import User
 from app.repositories.admin_repository import AdminRepository
 from app.repositories.app_settings_repository import AppSettingsRepository
@@ -21,6 +22,42 @@ class AdminService:
         self.repository = AdminRepository(db)
         self.settings_repo = AppSettingsRepository(db)
         self.auth = AuthRepository(db)
+
+    async def _audit(
+        self,
+        actor: User,
+        *,
+        action: str,
+        target_type: str,
+        target_id: int | None,
+        summary: str,
+        before: dict | None = None,
+        after: dict | None = None,
+    ) -> None:
+        self.db.add(
+            AdminAuditLog(
+                actor_user_id=actor.id,
+                actor_email=actor.email,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                summary=summary,
+                before_state=before or {},
+                after_state=after or {},
+            )
+        )
+        await self.db.flush()
+
+    @staticmethod
+    def _user_audit_state(user: User) -> dict:
+        return {
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "is_verified": bool(user.is_verified),
+            "is_active": bool(user.is_active),
+            "is_admin": bool(user.is_admin),
+        }
 
     @staticmethod
     def _user_name(user: User) -> str:
@@ -121,7 +158,7 @@ class AdminService:
     async def dashboard(self) -> dict:
         return await self.repository.dashboard()
 
-    async def create_user(self, request: AdminUserCreateRequest) -> dict:
+    async def create_user(self, actor: User, request: AdminUserCreateRequest) -> dict:
         email = str(request.email).lower().strip()
         if await self.repository.get_user_by_email(email):
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Пользователь с такой почтой уже существует")
@@ -140,6 +177,14 @@ class AdminService:
         except IntegrityError as exc:
             await self.db.rollback()
             raise HTTPException(status_code=409, detail="Пользователь с такой почтой уже существует") from exc
+        await self._audit(
+            actor,
+            action="user_created",
+            target_type="user",
+            target_id=user.id,
+            summary=f"Создан пользователь {user.email}",
+            after=self._user_audit_state(user),
+        )
         await self.db.commit()
         await self.db.refresh(user)
         return self.user_item(user, 0, 0)
@@ -148,6 +193,7 @@ class AdminService:
         if actor.id == user_id:
             raise HTTPException(status_code=403, detail="Нельзя изменять собственную учётную запись через админ-панель")
         user = await self._user_or_404(user_id)
+        before = self._user_audit_state(user)
         values = request.model_dump(exclude_unset=True)
         if "email" in values:
             email = str(values["email"]).lower().strip()
@@ -174,6 +220,15 @@ class AdminService:
         if values.get("is_active") is False:
             await self.auth.revoke_all_refresh_tokens(user.id)
         try:
+            await self._audit(
+                actor,
+                action="user_updated",
+                target_type="user",
+                target_id=user.id,
+                summary=f"Изменены данные пользователя {user.email}",
+                before=before,
+                after=self._user_audit_state(user),
+            )
             await self.db.commit()
         except IntegrityError as exc:
             await self.db.rollback()
@@ -191,6 +246,13 @@ class AdminService:
         user.failed_login_attempts = 0
         user.locked_until = None
         await self.auth.revoke_all_refresh_tokens(user.id)
+        await self._audit(
+            actor,
+            action="user_password_changed",
+            target_type="user",
+            target_id=user.id,
+            summary=f"Изменён пароль пользователя {user.email}; активные сессии завершены",
+        )
         await self.db.commit()
         return {"message": "Пароль пользователя изменён, активные сессии завершены"}
 
@@ -198,6 +260,7 @@ class AdminService:
         if user_id == actor.id:
             raise HTTPException(status_code=409, detail="Нельзя удалить собственный аккаунт")
         user = await self._user_or_404(user_id)
+        before = self._user_audit_state(user)
         if user.is_admin and await self.repository.admin_count() <= 1:
             raise HTTPException(status_code=409, detail="Нельзя удалить последнего администратора")
         # User deletion cascades WB connections, tests, operations, and local
@@ -224,15 +287,54 @@ class AdminService:
                 ),
             )
         await self.repository.delete_user(user)
+        await self._audit(
+            actor,
+            action="user_deleted",
+            target_type="user",
+            target_id=user.id,
+            summary=f"Удалён пользователь {before['email']}",
+            before=before,
+        )
         await self.db.commit()
 
     async def get_settings(self) -> dict:
         return {"registration_enabled": await self.settings_repo.get_bool(self.REGISTRATION_KEY, default=True)}
 
-    async def update_settings(self, registration_enabled: bool) -> dict:
+    async def update_settings(self, actor: User, registration_enabled: bool) -> dict:
+        previous = await self.settings_repo.get_bool(self.REGISTRATION_KEY, default=True)
         await self.settings_repo.set_bool(self.REGISTRATION_KEY, registration_enabled)
+        await self._audit(
+            actor,
+            action="registration_setting_changed",
+            target_type="setting",
+            target_id=None,
+            summary=("Включена регистрация пользователей" if registration_enabled else "Отключена регистрация пользователей"),
+            before={"registration_enabled": bool(previous)},
+            after={"registration_enabled": bool(registration_enabled)},
+        )
         await self.db.commit()
         return await self.get_settings()
+
+    async def audit_logs(self, limit: int = 100) -> dict:
+        items = await self.repository.list_audit_logs(limit=limit)
+        return {
+            "items": [
+                {
+                    "id": item.id,
+                    "actor_user_id": item.actor_user_id,
+                    "actor_email": item.actor_email,
+                    "action": item.action,
+                    "target_type": item.target_type,
+                    "target_id": item.target_id,
+                    "summary": item.summary,
+                    "before_state": item.before_state or {},
+                    "after_state": item.after_state or {},
+                    "created_at": item.created_at,
+                }
+                for item in items
+            ],
+            "total": len(items),
+        }
 
     async def _user_or_404(self, user_id: int) -> User:
         user = await self.repository.get_user(user_id)

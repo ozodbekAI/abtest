@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 class WBPromotionClient:
     _stats_locks: dict[str, asyncio.Lock] = {}
     _last_stats_at: dict[str, float] = {}
-    _stats_cache: dict[tuple[str, tuple[int, ...], str, str], tuple[float, dict[str, float]]] = {}
+    _stats_cache: dict[tuple[str, tuple[int, ...], str, str], tuple[float, dict[str, Any]]] = {}
     _stats_cache_ttl = 45.0
     _campaign_cache: dict[str, tuple[float, list[dict[str, int]]]] = {}
     _campaign_cache_ttl = 45.0
@@ -233,13 +233,33 @@ class WBPromotionClient:
             for bid in row.get("bids") or row.get("values") or []:
                 if not isinstance(bid, dict):
                     continue
-                bid_type = str(bid.get("type") or "").lower()
-                if bid_type not in {api_placement.lower(), "combined"}:
+                returned_bid_type = str(bid.get("type") or "").lower()
+                if returned_bid_type not in {api_placement.lower(), "combined"}:
                     continue
-                value = int(float(bid.get("value") or 0))
+                try:
+                    value = float(bid.get("value"))
+                except (TypeError, ValueError) as exc:
+                    raise WBApiError(
+                        "Wildberries вернул минимальную ставку в неподдерживаемом формате; запуск заблокирован"
+                    ) from exc
+                unit = str(bid.get("unit") or bid.get("units") or bid.get("value_unit") or "").strip().lower()
+                if unit:
+                    kopeck_units = {"kopeck", "kopecks", "kop", "коп", "копейка", "копейки", "копеек"}
+                    ruble_units = {"rub", "ruble", "rubles", "руб", "рубль", "рубли", "рублей"}
+                    if unit in kopeck_units:
+                        value /= 100
+                    elif unit in ruble_units:
+                        pass
+                    else:
+                        raise WBApiError(
+                            "Wildberries вернул минимальную ставку в неизвестных единицах; запуск заблокирован"
+                        )
+                else:
+                    # The documented v1 endpoint returns kopecks when no
+                    # explicit unit is present.
+                    value /= 100
                 if value > 0:
-                    # The v1 endpoint returns kopecks.
-                    return (value + 99) // 100
+                    return int(value + 0.999999)
         return None
 
     async def get_balance(self) -> Any:
@@ -497,13 +517,64 @@ class WBPromotionClient:
                 return int(campaign.get("status", 0))
         return None
 
+    async def get_campaign_details(self, campaign_id: int) -> dict[str, Any] | None:
+        """Return one campaign from WB's current campaign details endpoint.
+
+        ``promotion/count`` only contains an ID and status. It is not enough
+        to prove that a campaign belongs to the selected product. The v2
+        details endpoint includes ``nm_settings`` with the campaign's WB
+        articles, so callers can verify the external object before depositing
+        money or starting it.
+        """
+        payload = await self._request(
+            "GET",
+            "/api/advert/v2/adverts",
+            params={"ids": str(int(campaign_id))},
+        )
+        rows = payload.get("adverts") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            return None
+        target = int(campaign_id)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw_id = row.get("id") or row.get("advertId") or row.get("advert_id")
+            try:
+                if raw_id is not None and int(raw_id) == target:
+                    return dict(row)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def campaign_nm_ids(details: dict[str, Any] | None) -> set[int]:
+        """Extract product IDs from the v2 campaign details response."""
+        if not isinstance(details, dict):
+            return set()
+        result: set[int] = set()
+        for key in ("nm_settings", "nmSettings", "nms", "nm_ids", "nmIds"):
+            values = details.get(key)
+            if not isinstance(values, list):
+                continue
+            for value in values:
+                if isinstance(value, dict):
+                    raw_id = value.get("nm_id") or value.get("nmId")
+                else:
+                    raw_id = value
+                try:
+                    if raw_id is not None and int(raw_id) > 0:
+                        result.add(int(raw_id))
+                except (TypeError, ValueError):
+                    continue
+        return result
+
     async def fullstats(
         self,
         campaign_id: int | list[int],
         *,
         started_at: date | None = None,
         end_at: date | None = None,
-    ) -> dict[str, float]:
+    ) -> dict[str, Any]:
         campaign_ids = [int(campaign_id)] if isinstance(campaign_id, int) else [int(value) for value in campaign_id]
         campaign_ids = list(dict.fromkeys(campaign_ids))
         if not campaign_ids or len(campaign_ids) > 50:
@@ -550,7 +621,10 @@ class WBPromotionClient:
             except WBApiError as exc:
                 if exc.status_code not in {429, 500, 502, 503, 504} or attempt == 3:
                     raise
-                delay = min(max(float(exc.retry_after or 0), 20.2), 60.0)
+                # A provider supplied Retry-After is a lower bound, not a
+                # suggestion. Never cap it locally: retrying at 60 seconds
+                # when WB asks for 90 seconds only creates another 429.
+                delay = max(float(exc.retry_after or 0), 20.2)
                 await asyncio.sleep(delay)
         if payload is None:
             raise WBApiError("WB fullstats не вернул данные")
@@ -560,14 +634,27 @@ class WBPromotionClient:
             rows = payload.get("data") or payload.get("items") or ([payload] if "days" in payload or "advertId" in payload else [])
         else:
             rows = []
-        valid_rows = [item for item in rows if isinstance(item, dict)]
-        if not valid_rows and isinstance(payload, dict):
+        row_dicts = [item for item in rows if isinstance(item, dict)]
+        identified_rows = [item for item in row_dicts if self._campaign_id(item) is not None]
+        if identified_rows:
+            requested_ids = set(campaign_ids)
+            row_dicts = [item for item in row_dicts if self._campaign_id(item) in requested_ids]
+        valid_rows = [item for item in row_dicts if self._has_any_metric(item)]
+        if not valid_rows and not row_dicts and isinstance(payload, dict) and self._has_any_metric(payload):
             valid_rows = [payload]
+        available_metrics = {
+            "views": any(self._has_metric(row, "views", aliases=("shows", "impressions")) for row in valid_rows),
+            "clicks": any(self._has_metric(row, "clicks") for row in valid_rows),
+            "orders": any(self._has_metric(row, "orders") for row in valid_rows),
+            "sum": any(self._has_metric(row, "sum", aliases=("sum_price", "spend", "cost")) for row in valid_rows),
+        }
         totals = {
             "views": sum(self._metric_total(row, "views", aliases=("shows", "impressions")) for row in valid_rows),
             "clicks": sum(self._metric_total(row, "clicks") for row in valid_rows),
             "orders": sum(self._metric_total(row, "orders") for row in valid_rows),
             "sum": sum(self._metric_total(row, "sum", aliases=("sum_price", "spend", "cost")) for row in valid_rows),
+            "_has_data": bool(valid_rows),
+            "_available_metrics": available_metrics,
         }
         if len(self.__class__._stats_cache) >= 256:
             self.__class__._stats_cache.pop(next(iter(self.__class__._stats_cache)))
@@ -580,7 +667,7 @@ class WBPromotionClient:
         *,
         started_at: date | None = None,
         end_at: date | None = None,
-    ) -> dict[str, float] | None:
+    ) -> dict[str, Any] | None:
         """Return a recent result without reserving another WB API slot."""
         campaign_ids = [int(campaign_id)] if isinstance(campaign_id, int) else [int(value) for value in campaign_id]
         campaign_ids = list(dict.fromkeys(campaign_ids))
@@ -610,10 +697,10 @@ class WBPromotionClient:
         for metric_key in (key, *aliases):
             direct = node.get(metric_key)
             if isinstance(direct, (int, float)):
-                return max(float(direct), 0.0)
+                return float(direct)
             if isinstance(direct, str):
                 try:
-                    return max(float(direct.replace(",", ".")), 0.0)
+                    return float(direct.replace(",", "."))
                 except ValueError:
                     continue
         for container_key in ("days", "dates"):
@@ -632,3 +719,54 @@ class WBPromotionClient:
         if isinstance(nested, list):
             return sum(cls._metric_total(child, key, aliases) for child in nested)
         return 0.0
+
+    @classmethod
+    def _has_metric(cls, node: Any, key: str, aliases: tuple[str, ...] = ()) -> bool:
+        """Return whether a numeric metric is present, including WB wrappers."""
+        if not isinstance(node, dict):
+            return False
+        for metric_key in (key, *aliases):
+            direct = node.get(metric_key)
+            if isinstance(direct, (int, float)):
+                return True
+            if isinstance(direct, str):
+                try:
+                    float(direct.replace(",", "."))
+                    return True
+                except ValueError:
+                    pass
+        for container_key in ("days", "dates", "apps", "nm", "nms"):
+            children = node.get(container_key)
+            if isinstance(children, list) and any(cls._has_metric(child, key, aliases) for child in children):
+                return True
+        nested = node.get("stat") or node.get("stats") or node.get("result") or node.get("data")
+        if isinstance(nested, dict):
+            return cls._has_metric(nested, key, aliases)
+        if isinstance(nested, list):
+            return any(cls._has_metric(child, key, aliases) for child in nested)
+        return False
+
+    @classmethod
+    def _has_any_metric(cls, node: Any) -> bool:
+        return any(
+            cls._has_metric(node, key, aliases=aliases)
+            for key, aliases in (
+                ("views", ("shows", "impressions")),
+                ("clicks", ()),
+                ("orders", ()),
+                ("sum", ("sum_price", "spend", "cost")),
+            )
+        )
+
+    @staticmethod
+    def _campaign_id(node: Any) -> int | None:
+        if not isinstance(node, dict):
+            return None
+        for key in ("advertId", "advert_id", "campaignId", "campaign_id"):
+            value = node.get(key)
+            try:
+                if value is not None and int(value) > 0:
+                    return int(value)
+            except (TypeError, ValueError):
+                continue
+        return None

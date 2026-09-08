@@ -7,6 +7,7 @@ from app.core.security import get_current_admin
 from app.models.user import User
 from app.schemas.admin import (
     AdminDashboardResponse,
+    AdminAuditResponse,
     AdminPasswordRequest,
     AdminSettingsResponse,
     AdminSettingsUpdateRequest,
@@ -46,10 +47,10 @@ async def users(
 @router.post("/users", response_model=AdminUserItem, status_code=status.HTTP_201_CREATED)
 async def create_user(
     request: AdminUserCreateRequest,
-    _: User = Depends(get_current_admin),
+    actor: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await controller.create_user(db, request)
+    return await controller.create_user(db, actor, request)
 
 
 @router.get("/users/{user_id}", response_model=AdminUserDetail)
@@ -119,7 +120,16 @@ async def get_settings(
 @router.patch("/settings", response_model=AdminSettingsResponse)
 async def update_settings(
     request: AdminSettingsUpdateRequest,
+    actor: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    return await controller.update_settings(db, actor, request.registration_enabled)
+
+
+@router.get("/audit", response_model=AdminAuditResponse)
+async def audit(
+    limit: int = Query(default=100, ge=1, le=500),
     _: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
-    return await controller.update_settings(db, request.registration_enabled)
+    return await controller.audit_logs(db, limit)

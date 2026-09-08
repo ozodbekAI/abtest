@@ -15,8 +15,8 @@ class AdminController:
     async def user_detail(self, db: AsyncSession, actor: User, user_id: int) -> dict:
         return await AdminService(db).get_user_detail(actor, user_id)
 
-    async def create_user(self, db: AsyncSession, request: AdminUserCreateRequest) -> dict:
-        return await AdminService(db).create_user(request)
+    async def create_user(self, db: AsyncSession, actor: User, request: AdminUserCreateRequest) -> dict:
+        return await AdminService(db).create_user(actor, request)
 
     async def update_user(self, db: AsyncSession, actor: User, user_id: int, request: AdminUserUpdateRequest) -> dict:
         return await AdminService(db).update_user(actor, user_id, request)
@@ -36,5 +36,8 @@ class AdminController:
     async def settings(self, db: AsyncSession) -> dict:
         return await AdminService(db).get_settings()
 
-    async def update_settings(self, db: AsyncSession, registration_enabled: bool) -> dict:
-        return await AdminService(db).update_settings(registration_enabled)
+    async def update_settings(self, db: AsyncSession, actor: User, registration_enabled: bool) -> dict:
+        return await AdminService(db).update_settings(actor, registration_enabled)
+
+    async def audit_logs(self, db: AsyncSession, limit: int) -> dict:
+        return await AdminService(db).audit_logs(limit)

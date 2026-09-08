@@ -150,6 +150,19 @@ export type AdminDashboard = {
 
 export type AdminSettings = { registration_enabled: boolean };
 
+export type AdminAuditItem = {
+  id: number;
+  actor_user_id?: number | null;
+  actor_email: string;
+  action: string;
+  target_type: string;
+  target_id?: number | null;
+  summary: string;
+  before_state: Record<string, unknown>;
+  after_state: Record<string, unknown>;
+  created_at: string;
+};
+
 export type ABTestStatus = 'draft' | 'running' | 'finished' | 'failed' | 'stopped' | string;
 
 export type ABTestCard = {
@@ -204,7 +217,7 @@ export type ABTest = {
   placement: string;
   current_variant_order: number;
   winner_variant_order?: number | null;
-  winner_decision?: 'winner_found' | 'no_clear_winner' | 'insufficient_data' | 'test_interrupted' | null;
+  winner_decision?: 'winner_found' | 'no_clear_winner' | 'insufficient_data' | 'statistics_not_attributable' | 'test_interrupted' | null;
   operation_state: string;
   campaign_state: string;
   media_status: string;

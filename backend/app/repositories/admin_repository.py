@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.models.ab_test import ABTest, ABTestStatus
+from app.models.admin_audit import AdminAuditLog
 from app.models.user import User
 from app.models.wb_connection import WBConnection
 
@@ -156,3 +157,11 @@ class AdminRepository:
 
     async def delete_user(self, user: User) -> None:
         await self.db.delete(user)
+
+    async def list_audit_logs(self, *, limit: int = 100) -> list[AdminAuditLog]:
+        result = await self.db.scalars(
+            select(AdminAuditLog)
+            .order_by(AdminAuditLog.created_at.desc(), AdminAuditLog.id.desc())
+            .limit(max(1, min(int(limit), 500)))
+        )
+        return list(result.all())

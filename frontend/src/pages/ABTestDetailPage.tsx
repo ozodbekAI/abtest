@@ -3,6 +3,7 @@ import { ArrowLeft, CheckCircle2, CircleAlert, Clock3, Eye, LoaderCircle, Pause,
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { toast } from 'sonner';
 import { api } from '../api/client';
+import { AuthenticatedImage } from '../components/AuthenticatedImage';
 import { AppShell } from '../components/AppShell';
 import type { ABTest, ABTestVariant } from '../types';
 import { imageUrl } from '../utils/media';
@@ -17,8 +18,8 @@ function calculateCpm(spend: number, views: number) { return views > 0 ? (spend 
 function formatPercent(value: number) { return `${Number(value || 0).toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}%`; }
 const MIN_TEST_BUDGET_RUB = 1200;
 function calculateRequiredBudget(photosCount: number, viewsPerVariant: number, cpmRub: number) {
-  const rawSpend = (Math.max(0, photosCount) * Math.max(0, viewsPerVariant) * Math.max(0, cpmRub)) / 1000;
-  return Math.ceil(Math.max(rawSpend * 1.1, MIN_TEST_BUDGET_RUB) / 100) * 100;
+  const rawSpendRub = Math.ceil((Math.max(0, photosCount) * Math.max(0, viewsPerVariant) * Math.max(0, cpmRub)) / 1000);
+  return Math.ceil(Math.max(rawSpendRub, MIN_TEST_BUDGET_RUB) / 100) * 100;
 }
 function newOperationKey(testId: number) {
   return typeof crypto !== 'undefined' && crypto.randomUUID
@@ -78,7 +79,17 @@ export function ABTestDetailPage() {
                   ? 'Тест продолжен в существующей кампании'
                   : 'Операция сверена'
       );
-    } catch (error: any) { toast.error(error?.message || 'Не удалось выполнить действие'); await load(true); }
+    } catch (error: any) {
+      const detail = error?.details?.detail;
+      if (kind === 'resume' && detail?.code === 'minimum_cpm_increased') {
+        toast.error(detail.message || 'Минимальная ставка Wildberries изменилась. Требуется новое подтверждение.');
+        await load(true);
+        setResumeConfirmOpen(true);
+      } else {
+        toast.error(error?.message || 'Не удалось выполнить действие');
+        await load(true);
+      }
+    }
     finally { setBusy(false); }
   };
 
@@ -86,14 +97,16 @@ export function ABTestDetailPage() {
   if (!test) return <AppShell><div className="page-wrap"><div className="ab-empty"><h3>{loadError ? 'Не удалось загрузить тест' : 'Тест не найден'}</h3><p>{loadError || 'Проверьте ссылку и выбранный магазин.'}</p><div className="ab-empty-actions">{loadError && <button className="primary-button" onClick={() => void load()} disabled={loading}><RefreshCw size={16} /> Повторить</button>}<Link to="/ab-tests" className="outline-button">Вернуться к тестам</Link></div></div></div></AppShell>;
 
   const current = test.variants.find((variant) => variant.position === test.current_variant_order);
-  const winner = test.variants.find((variant) => variant.position === test.winner_variant_order);
+  const winner = test.variants.find((variant) => variant.position === test.winner_variant_order) || null;
   const progress = test.views_per_variant ? Math.min(100, ((current?.views || 0) / test.views_per_variant) * 100) : 0;
   const needsReconciliation = test.operation_state === 'reconciliation_required' || test.status === 'failed';
   const canResumeExistingCampaign = test.status === 'draft' && Boolean(test.wb_campaign_id) && ['created', 'stopped'].includes(test.campaign_state) && !test.started_at;
   const resumeVariantCount = test.variants.filter((variant) => variant.source_type !== 'control').length + (test.skip_current_photo ? 0 : 1);
   const resumeCalculatedBudget = calculateRequiredBudget(resumeVariantCount, test.views_per_variant, test.cpm_rub);
   const resumeBudget = Math.max(Number(test.budget_rub || 0), resumeCalculatedBudget);
-  const displayWinner = winner || (test.status === 'finished' ? selectDisplayWinner(test.variants) : null);
+  // The backend is the source of truth. Do not infer a winner from aggregate
+  // campaign totals: WB fullstats does not attribute clicks to a photo.
+  const displayWinner = winner;
   const totalPhotoCount = test.variants.length;
   const completedPhotoCount = test.status === 'finished'
     ? totalPhotoCount
@@ -186,12 +199,13 @@ function FinalResultsSection({ test, variants, winner }: { test: ABTest; variant
       const isCurrent = isRunning && variant.position === test.current_variant_order;
       const badge = isWinner ? 'Лучший' : isCurrent ? 'Сейчас в тесте' : isFinished ? 'Нормально' : variant.views > 0 ? 'Собрано' : 'Ожидает';
       const ctr = variant.views ? `${statsAreAggregate ? '≈' : ''}${formatPercent(variant.ctr)}` : '—';
+      const variantLabel = variant.position === 0 ? 'Главное фото' : `Фото ${variant.position}`;
       return <article className={`ab-final-card ${isWinner ? 'winner' : ''}`} key={variant.id}>
-        <div className="ab-final-image">{variant.image_url ? <img src={imageUrl(variant.image_url)} alt={`Фото ${variant.position}`} /> : <span><Clock3 size={24} /></span>}<b className={isCurrent ? 'current' : ''}>{badge}</b></div>
-        <div className="ab-final-card-body"><strong>Фото {variant.position}</strong><em>{ctr}</em><div className="ab-final-card-stats"><span><Eye size={13} /> Показы: {formatNumber(variant.views)}</span><span>Клики: {formatNumber(variant.clicks)}</span></div></div>
-        </article>;
+        <div className="ab-final-image">{variant.image_url ? <AuthenticatedImage src={imageUrl(variant.image_url)} alt={variantLabel} /> : <span><Clock3 size={24} /></span>}<b className={isCurrent ? 'current' : ''}>{badge}</b></div>
+        <div className="ab-final-card-body"><strong>{variantLabel}</strong><em>{ctr}</em><div className="ab-final-card-stats"><span><Eye size={13} /> Показы: {formatNumber(variant.views)}</span><span>Клики: {formatNumber(variant.clicks)}</span></div></div>
+      </article>;
     })}</div>
-    <div className="ab-comparison-wrap"><table className="ab-comparison-table"><thead><tr><th>Показатель</th>{ordered.map((variant) => <th key={variant.id}>Фото {variant.position}</th>)}</tr></thead><tbody>
+    <div className="ab-comparison-wrap"><table className="ab-comparison-table"><thead><tr><th>Показатель</th>{ordered.map((variant) => <th key={variant.id}>{variant.position === 0 ? 'Главное фото' : `Фото ${variant.position}`}</th>)}</tr></thead><tbody>
       <tr><th>Статус</th>{ordered.map((variant) => { const isWinner = Boolean(winner && variant.id === winner.id); const isCurrent = isRunning && variant.position === test.current_variant_order; const status = isWinner ? 'Лучший' : isCurrent ? 'В тесте' : isFinished ? 'Нормально' : variant.views > 0 ? 'Собрано' : 'Ожидает'; return <td key={variant.id}><span className={`ab-final-status ${isWinner ? 'winner' : isCurrent ? 'current' : ''}`}>{status}</span></td>; })}</tr>
       <tr><th>Показов</th>{ordered.map((variant) => <td key={variant.id}>{formatNumber(variant.views)}</td>)}</tr>
       <tr><th>Кликов</th>{ordered.map((variant) => <td key={variant.id}>{formatNumber(variant.clicks)}</td>)}</tr>
@@ -205,9 +219,5 @@ function relativeToWinner(variant: ABTestVariant, winner: ABTestVariant) {
   if (!winner.ctr) return '—';
   const value = ((variant.ctr - winner.ctr) / winner.ctr) * 100;
   return `${value.toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 1 })}`;
-}
-function selectDisplayWinner(variants: ABTestVariant[]) {
-  const candidates = variants.filter((variant) => variant.source_type !== 'control' && variant.views > 0);
-  return [...candidates].sort((left, right) => (right.ctr - left.ctr) || (right.clicks - left.clicks) || (left.position - right.position))[0] || null;
 }
 function SettingsIcon() { return <span className="ab-settings-icon">⚙</span>; }

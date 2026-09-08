@@ -2,6 +2,7 @@ from base64 import urlsafe_b64encode
 from datetime import datetime, timezone
 import hashlib
 import asyncio
+import hmac
 from typing import Any
 
 import httpx
@@ -153,6 +154,22 @@ class WBTokenService:
                 },
             )
         connections = await self.repository.list_for_user(user_id)
+        for existing in connections:
+            try:
+                existing_token = self.decrypt_token(existing.token_encrypted)
+            except RuntimeError:
+                # Do not let one legacy/corrupt record prevent a new valid
+                # connection from being added; its own validation still runs.
+                continue
+            if hmac.compare_digest(existing_token, token):
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "connection_already_exists",
+                        "message": "Этот токен Wildberries уже подключён в выбранном пространстве.",
+                        "connection_id": existing.id,
+                    },
+                )
         store_name = store_name.strip() or f"Магазин {len(connections) + 1}"
         values = {
             "store_name": store_name,

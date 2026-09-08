@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ipaddress
 import logging
 import secrets
+import socket
 import time
 from typing import Any
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -169,7 +172,17 @@ class WBContentClient:
             next_cursor = response_data.get("cursor")
         if not isinstance(next_cursor, dict):
             next_cursor = None
-        normalized = [self.normalize_card(card) for card in cards if isinstance(card, dict)]
+        normalized: list[dict[str, Any]] = []
+        seen_nm_ids: set[int] = set()
+        for card in cards:
+            if not isinstance(card, dict):
+                continue
+            normalized_card = self.normalize_card(card)
+            nm_id = int(normalized_card.get("nm_id") or 0)
+            if not nm_id or nm_id in seen_nm_ids:
+                continue
+            seen_nm_ids.add(nm_id)
+            normalized.append(normalized_card)
         if numeric_search:
             normalized = [card for card in normalized if card["nm_id"] == int(search_value)]
         return normalized, next_cursor
@@ -182,11 +195,16 @@ class WBContentClient:
         """Read all available pages with a safety cap for a very large catalog."""
         page_limit = min(max(int(limit), 1), 100)
         result: list[dict[str, Any]] = []
+        seen_nm_ids: set[int] = set()
         cursor: dict[str, Any] | None = None
         seen_cursors: set[tuple[tuple[str, str], ...]] = set()
         for _ in range(max(1, max_pages)):
             page, next_cursor = await self.list_cards_page(search=search, limit=page_limit, cursor=cursor)
-            result.extend(page)
+            for card in page:
+                nm_id = int(card.get("nm_id") or 0)
+                if nm_id and nm_id not in seen_nm_ids:
+                    seen_nm_ids.add(nm_id)
+                    result.append(card)
             if not next_cursor:
                 break
             # WB's cursor is based on updatedAt + nmID. If either value is
@@ -218,11 +236,24 @@ class WBContentClient:
         if cache_bust:
             separator = "&" if "?" in request_url else "?"
             request_url = f"{request_url}{separator}wb_optimizer_verify={secrets.token_hex(8)}"
-        async with httpx.AsyncClient(timeout=90.0, follow_redirects=True) as client:
-            response = await client.get(
-                request_url,
-                headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
-            )
+        async with httpx.AsyncClient(timeout=90.0, follow_redirects=False) as client:
+            response = None
+            for _ in range(4):
+                await self._assert_public_image_url(request_url)
+                response = await client.get(
+                    request_url,
+                    headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+                )
+                if response.status_code not in {301, 302, 303, 307, 308}:
+                    break
+                location = response.headers.get("location")
+                if not location:
+                    raise WBApiError("Ссылка на изображение ведёт на некорректное перенаправление")
+                request_url = urljoin(request_url, location)
+            else:
+                raise WBApiError("Слишком много перенаправлений при загрузке изображения")
+        if response is None:
+            raise WBApiError("Не удалось загрузить изображение")
         logger.info("WB image download status=%s cache_bust=%s", response.status_code, cache_bust)
         if not 200 <= response.status_code < 300:
             raise WBApiError(f"Не удалось загрузить изображение: HTTP {response.status_code}", status_code=response.status_code)
@@ -232,6 +263,38 @@ class WBContentClient:
         if len(response.content) > 32 * 1024 * 1024:
             raise WBApiError("Изображение больше допустимых 32 МБ")
         return response.content, content_type
+
+    @staticmethod
+    async def _assert_public_image_url(url: str) -> None:
+        """Reject localhost/private-network image targets, including DNS hits."""
+        parsed = urlsplit(str(url).strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
+            raise WBApiError("Ссылка на изображение должна быть публичным HTTP(S)-адресом")
+        try:
+            host = parsed.hostname
+            port = parsed.port
+        except ValueError as exc:
+            raise WBApiError("Ссылка на изображение содержит некорректный порт") from exc
+        del port  # Accessing ``parsed.port`` above validates it.
+        try:
+            addresses = [ipaddress.ip_address(host)]
+        except ValueError:
+            try:
+                # Resolve synchronously here because the server must not rely
+                # on a possibly unavailable default thread executor just to
+                # validate a CDN URL. This is a short DNS lookup and the
+                # request is rejected immediately on resolution failure.
+                resolved = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            except OSError as exc:
+                raise WBApiError("Не удалось проверить адрес изображения") from exc
+            addresses = []
+            for item in resolved:
+                try:
+                    addresses.append(ipaddress.ip_address(item[4][0]))
+                except (IndexError, ValueError):
+                    continue
+        if not addresses or any(not address.is_global for address in addresses):
+            raise WBApiError("Загрузка изображений из внутренней сети запрещена")
 
     async def upload_media_file(
         self, *, nm_id: int, photo_number: int, content: bytes, filename: str, content_type: str
