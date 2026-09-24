@@ -1059,15 +1059,39 @@ class ABTestService:
             raise RuntimeError(f"Файл резервной копии слота {slot} отсутствует на сервере")
         return path.read_bytes(), str(entry.get("mime") or "image/jpeg"), str(entry.get("file_name") or path.name)
 
-    def _write_shadow(self, test: ABTest, slot: int, data: bytes, mime: str, filename: str) -> dict[str, Any]:
+    def _write_shadow(
+        self,
+        test: ABTest,
+        slot: int,
+        data: bytes,
+        mime: str,
+        filename: str,
+    ) -> dict[str, Any]:
         extension = self._image_extension(mime, filename)
-        relative = Path("ab_tests") / str(test.id) / "current" / f"slot_{slot}{extension}"
+        relative = (
+            Path("ab_tests")
+            / str(test.id)
+            / "current"
+            / f"slot_{slot}{extension}"
+        )
         target = self._media_root() / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        old_path = (self._media_state(test).get("shadows") or {}).get(str(slot), {}).get("path")
+
+        old_path = (
+            self._media_state(test).get("shadows") or {}
+        ).get(str(slot), {}).get("path")
+
         target.write_bytes(data)
-        if old_path and str(old_path) != str(relative):
-            self._state_file(str(old_path)).unlink(missing_ok=True)
+
+        # Shadows may previously point to an original backup.
+        # Never delete anything from original/.
+        if old_path:
+            old_path = str(old_path)
+            current_prefix = f"ab_tests/{test.id}/current/"
+
+            if old_path.startswith(current_prefix) and old_path != str(relative):
+                self._state_file(old_path).unlink(missing_ok=True)
+
         return {
             "path": str(relative),
             "mime": mime or "image/jpeg",
