@@ -1154,57 +1154,81 @@ class ABTestService:
         attempts: int = 5,
         delay_seconds: int = 10,
         threshold: int = 10,
-        previous_data: bytes | None = None,
     ) -> bool:
+        """
+        Verify that WB CDN serves the exact image uploaded to the slot.
 
-        attempts = attempts or self.IMAGE_VERIFY_ATTEMPTS
-        delay_seconds = (
-            self.IMAGE_VERIFY_DELAY_SECONDS
-            if delay_seconds is None
-            else delay_seconds
-        )
-        threshold = (
-            self.IMAGE_PHASH_THRESHOLD
-            if threshold is None
-            else threshold
-        )
+        Flow:
+            upload
+            -> wait for propagation
+            -> fetch current card
+            -> get current slot URL
+            -> download CDN image
+            -> compare pHash
+        """
 
         expected_hash = self._perceptual_hash(expected_data)
 
+        logger.info(
+            "WB VERIFY EXPECTED "
+            "test_id=%s nm_id=%s slot=%s "
+            "bytes=%s sha256=%s phash=%s",
+            test.id,
+            test.nm_id,
+            slot,
+            len(expected_data),
+            hashlib.sha256(expected_data).hexdigest(),
+            expected_hash,
+        )
+
         for attempt in range(1, attempts + 1):
             try:
-                cards, _ = await content.list_cards_page(
-                    search=str(test.nm_id),
-                    limit=100,
-                    cursor=None,
-                )
+                # -------------------------------------------------
+                # 1. GET FRESH CARD
+                # -------------------------------------------------
 
-                card = next(
-                    (
-                        card
-                        for card in cards
-                        if int(card.get("nm_id", 0)) == int(test.nm_id)
-                    ),
-                    None,
-                )
+                card = await content.get_card(test.nm_id)
 
                 if not card:
                     logger.warning(
-                        "WB image verification: card not found "
-                        "test_id=%s nm_id=%s attempt=%s",
+                        "WB VERIFY CARD NOT FOUND "
+                        "test_id=%s nm_id=%s slot=%s attempt=%s",
                         test.id,
                         test.nm_id,
+                        slot,
                         attempt,
                     )
-                else:
-                    media = card.get("photos") or card.get("media") or []
 
-                    if slot <= len(media):
+                else:
+                    media = (
+                        card.get("photos")
+                        or card.get("media")
+                        or []
+                    )
+
+                    if slot > len(media):
+                        logger.warning(
+                            "WB VERIFY SLOT NOT AVAILABLE "
+                            "test_id=%s nm_id=%s slot=%s "
+                            "photos=%s attempt=%s",
+                            test.id,
+                            test.nm_id,
+                            slot,
+                            len(media),
+                            attempt,
+                        )
+
+                    else:
+                        # -------------------------------------------------
+                        # 2. GET CURRENT SLOT
+                        # -------------------------------------------------
+
                         raw_media = media[slot - 1]
 
                         if isinstance(raw_media, dict):
                             url = (
                                 raw_media.get("big")
+                                or raw_media.get("hq")
                                 or raw_media.get("c246x328")
                                 or raw_media.get("c516x688")
                                 or raw_media.get("url")
@@ -1212,87 +1236,110 @@ class ABTestService:
                         else:
                             url = str(raw_media)
 
-                        if url:
-                            cdn_data, _ = await content.download_image(
-                                url,
-                                cache_bust=True,
+                        url = str(url).strip() if url else ""
+
+                        if not url:
+                            logger.warning(
+                                "WB VERIFY EMPTY URL "
+                                "test_id=%s nm_id=%s slot=%s "
+                                "attempt=%s",
+                                test.id,
+                                test.nm_id,
+                                slot,
+                                attempt,
                             )
 
-                            actual_hash = self._perceptual_hash(cdn_data)
-                            distance = expected_hash - actual_hash
+                        else:
+                            logger.info(
+                                "WB VERIFY CDN URL "
+                                "test_id=%s nm_id=%s slot=%s "
+                                "attempt=%s url=%s",
+                                test.id,
+                                test.nm_id,
+                                slot,
+                                attempt,
+                                url,
+                            )
 
-                            # First check:
-                            # Is the image served by WB/CDN actually the image we uploaded?
-                            upload_verified = distance <= threshold
+                            # -------------------------------------------------
+                            # 3. DOWNLOAD CURRENT CDN IMAGE
+                            # -------------------------------------------------
+
+                            cdn_data, cdn_content_type = (
+                                await content.download_image(
+                                    url,
+                                    cache_bust=True,
+                                )
+                            )
+
+                            # -------------------------------------------------
+                            # 4. VERIFY IMAGE
+                            # -------------------------------------------------
+
+                            actual_hash = self._perceptual_hash(
+                                cdn_data
+                            )
+
+                            distance = (
+                                expected_hash - actual_hash
+                            )
 
                             logger.info(
-                                "WB upload verification "
-                                "test_id=%s nm_id=%s slot=%s attempt=%s "
-                                "distance=%s threshold=%s verified=%s",
+                                "WB VERIFY RESULT "
+                                "test_id=%s nm_id=%s slot=%s "
+                                "attempt=%s "
+                                "expected_phash=%s "
+                                "actual_phash=%s "
+                                "distance=%s "
+                                "threshold=%s "
+                                "expected_bytes=%s "
+                                "actual_bytes=%s "
+                                "actual_sha256=%s "
+                                "content_type=%s",
+                                test.id,
+                                test.nm_id,
+                                slot,
+                                attempt,
+                                expected_hash,
+                                actual_hash,
+                                distance,
+                                threshold,
+                                len(expected_data),
+                                len(cdn_data),
+                                hashlib.sha256(cdn_data).hexdigest(),
+                                cdn_content_type,
+                            )
+
+                            if distance <= threshold:
+                                logger.info(
+                                    "WB VERIFY SUCCESS "
+                                    "test_id=%s nm_id=%s slot=%s "
+                                    "attempt=%s distance=%s",
+                                    test.id,
+                                    test.nm_id,
+                                    slot,
+                                    attempt,
+                                    distance,
+                                )
+
+                                return True
+
+                            logger.warning(
+                                "WB VERIFY HASH MISMATCH "
+                                "test_id=%s nm_id=%s slot=%s "
+                                "attempt=%s distance=%s",
                                 test.id,
                                 test.nm_id,
                                 slot,
                                 attempt,
                                 distance,
-                                threshold,
-                                upload_verified,
                             )
-
-                            if not upload_verified:
-                                logger.warning(
-                                    "WB CDN image does not match uploaded image "
-                                    "test_id=%s nm_id=%s slot=%s attempt=%s "
-                                    "distance=%s threshold=%s",
-                                    test.id,
-                                    test.nm_id,
-                                    slot,
-                                    attempt,
-                                    distance,
-                                    threshold,
-                                )
-                            else:
-                                # Second check:
-                                # Compare the REAL image currently served by WB with
-                                # the image that was active before the upload.
-                                if previous_data is not None:
-                                    old_new_similar, old_new_distance = self._images_similar(
-                                        previous_data,
-                                        cdn_data,
-                                        threshold=threshold,
-                                    )
-
-                                    logger.info(
-                                        "AB image old/new comparison AFTER WB upload "
-                                        "test_id=%s nm_id=%s position=%s "
-                                        "distance=%s similar=%s",
-                                        test.id,
-                                        test.nm_id,
-                                        slot,
-                                        getattr(test, "current_variant_order", None),
-                                        old_new_distance,
-                                        old_new_similar,
-                                    )
-
-                                    if old_new_similar:
-                                        raise RuntimeError(
-                                            "Yangi rasm joriy rasmdan yetarlicha farq qilmaydi"
-                                        )
-
-                                logger.info(
-                                    "WB image verification SUCCESS "
-                                    "test_id=%s nm_id=%s slot=%s attempt=%s distance=%s",
-                                    test.id,
-                                    test.nm_id,
-                                    slot,
-                                    attempt,
-                                    distance,
-                                )
-                                return True
 
             except Exception as exc:
                 logger.warning(
-                    "WB image verification attempt failed "
-                    "test_id=%s nm_id=%s slot=%s attempt=%s error=%s",
+                    "WB VERIFY ATTEMPT FAILED "
+                    "test_id=%s nm_id=%s slot=%s "
+                    "attempt=%s error=%s",
                     test.id,
                     test.nm_id,
                     slot,
@@ -1300,8 +1347,33 @@ class ABTestService:
                     self._safe_error(exc),
                 )
 
+            # -------------------------------------------------
+            # WAIT BEFORE NEXT FRESH CARD/CDN CHECK
+            # -------------------------------------------------
+
             if attempt < attempts:
+                logger.info(
+                    "WB VERIFY RETRY "
+                    "test_id=%s nm_id=%s slot=%s "
+                    "next_attempt=%s wait=%ss",
+                    test.id,
+                    test.nm_id,
+                    slot,
+                    attempt + 1,
+                    delay_seconds,
+                )
+
                 await asyncio.sleep(delay_seconds)
+
+        logger.error(
+            "WB VERIFY FAILED "
+            "test_id=%s nm_id=%s slot=%s "
+            "attempts=%s",
+            test.id,
+            test.nm_id,
+            slot,
+            attempts,
+        )
 
         return False
 
@@ -1632,6 +1704,17 @@ class ABTestService:
         for slot in upload_order:
             slot_data, slot_mime, slot_name = targets[slot]
 
+            logger.info(
+                "WB UPLOAD START "
+                "test_id=%s nm_id=%s slot=%s "
+                "bytes=%s sha256=%s",
+                test.id,
+                test.nm_id,
+                slot,
+                len(slot_data),
+                hashlib.sha256(slot_data).hexdigest(),
+            )
+
             await content.upload_media_file(
                 nm_id=test.nm_id,
                 photo_number=slot,
@@ -1639,6 +1722,19 @@ class ABTestService:
                 filename=slot_name,
                 content_type=slot_mime,
             )
+
+            logger.info(
+                "WB UPLOAD ACCEPTED "
+                "test_id=%s nm_id=%s slot=%s",
+                test.id,
+                test.nm_id,
+                slot,
+            )
+
+            # Muhim:
+            # WB API upload 200 qaytargani bilan CDN darhol yangi
+            # image'ni bermasligi mumkin.
+            await asyncio.sleep(10)
 
             verified = await self._verify_uploaded_image(
                 test=test,
@@ -1648,55 +1744,12 @@ class ABTestService:
                 attempts=5,
                 delay_seconds=10,
                 threshold=10,
-                previous_data=current_main if slot == 1 else None,
             )
 
             if not verified:
-                pending = state.get("pending") or {}
-                verification = pending.get("verification") or {}
-
-                reupload_count = int(
-                    verification.get("reupload_count") or 0
-                )
-
-                if reupload_count < self.IMAGE_VERIFY_MAX_REUPLOADS:
-                    verification["status"] = "waiting_reupload"
-                    verification["reupload_count"] = reupload_count + 1
-                    verification["next_retry_at"] = (
-                        self._now().timestamp()
-                        + self.IMAGE_REUPLOAD_DELAY_SECONDS
-                    )
-
-                    pending["verification"] = verification
-                    state["pending"] = pending
-                    state["status"] = "waiting_image_reupload"
-
-                    test.media_status = "waiting_image_reupload"
-
-                    await self._set_media_state(test, state)
-
-                    # The image is not confirmed. Pause the campaign before
-                    # leaving the worker to retry the upload one hour later.
-                    if promotion is not None:
-                        await self._pause_campaign_confirmed(
-                            test,
-                            promotion,
-                        )
-
-                    logger.warning(
-                        "WB image verification failed; reupload scheduled "
-                        "test_id=%s nm_id=%s slot=%s retry_in=%ss",
-                        test.id,
-                        test.nm_id,
-                        slot,
-                        self.IMAGE_REUPLOAD_DELAY_SECONDS,
-                    )
-
-                    return
-
                 raise ABTestReconciliationRequired(
                     f"WB не подтвердил обновление изображения "
-                    f"слота {slot} после повторной загрузки"
+                    f"слота {slot} после загрузки"
                 )
         state["shadows"] = {**(state.get("shadows") or {}), **shadow_entries}
         state["pending"] = None
