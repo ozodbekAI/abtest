@@ -1173,7 +1173,20 @@ class ABTestService:
 
         for attempt in range(1, attempts + 1):
             try:
-                card = await content.get_card(test.nm_id)
+                cards, _ = await content.list_cards_page(
+                    search=str(test.nm_id),
+                    limit=100,
+                    cursor=None,
+                )
+
+                card = next(
+                    (
+                        card
+                        for card in cards
+                        if int(card.get("nm_id", 0)) == int(test.nm_id)
+                    ),
+                    None,
+                )
 
                 if not card:
                     logger.warning(
