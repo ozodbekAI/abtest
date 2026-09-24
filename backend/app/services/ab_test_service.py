@@ -1485,7 +1485,7 @@ class ABTestService:
             threshold=10,
         )
 
-        logger.info(
+        logger.warning(
             "AB image old/new comparison "
             "test_id=%s nm_id=%s position=%s distance=%s similar=%s",
             test.id,
