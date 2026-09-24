@@ -10,6 +10,8 @@ import hashlib
 import hmac
 import io
 import json
+import imagehash
+from PIL import Image
 import logging
 import math
 import mimetypes
@@ -49,6 +51,15 @@ class ABCampaignProductMismatch(ABTestReconciliationRequired):
 
 class ABTestService:
     MAX_IMAGE_BYTES = 32 * 1024 * 1024
+
+    IMAGE_VERIFY_ATTEMPTS = 5
+    IMAGE_VERIFY_DELAY_SECONDS = 60
+
+    IMAGE_REUPLOAD_DELAY_SECONDS = 3600
+
+    IMAGE_PHASH_THRESHOLD = 10
+
+    IMAGE_VERIFY_MAX_REUPLOADS = 1
     # A/B experiments are intentionally limited to 2–5 tested images.  The
     # product-card API supports up to 30 media slots, but those are not 30
     # statistically comparable experiment variants. Keeping this limit in the
@@ -79,6 +90,7 @@ class ABTestService:
     WINNER_MIN_CTR_DELTA = 0.35
     CAMPAIGN_ACTIVE_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_STOP_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
+    CAMPAIGN_PAUSE_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_BUDGET_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_DETAILS_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
     MAX_STATS_STALE_SECONDS = 300
@@ -87,6 +99,39 @@ class ABTestService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.repository = ABTestRepository(db)
+
+    @staticmethod
+    def _perceptual_hash(data: bytes) -> imagehash.ImageHash:
+        """Calculate perceptual hash for an image."""
+        image = Image.open(io.BytesIO(data))
+        return imagehash.phash(image)
+
+    @staticmethod
+    def _image_hash_distance(hash1: imagehash.ImageHash, hash2: imagehash.ImageHash) -> int:
+        """Return Hamming distance between two perceptual hashes."""
+        return hash1 - hash2
+
+    @classmethod
+    def _images_similar(
+        cls,
+        data1: bytes,
+        data2: bytes,
+        *,
+        threshold: int = 10,
+    ) -> tuple[bool, int]:
+        """
+        Compare two images using perceptual hash.
+
+        Returns:
+            (is_similar, hamming_distance)
+        """
+        hash1 = cls._perceptual_hash(data1)
+        hash2 = cls._perceptual_hash(data2)
+
+        distance = cls._image_hash_distance(hash1, hash2)
+
+        return distance <= threshold, distance
+
 
     @staticmethod
     def _required_budget_for_test(test: ABTest) -> int:
@@ -1029,10 +1074,21 @@ class ABTestService:
             "file_name": filename or target.name,
         }
 
-    async def _apply_variant(self, test: ABTest, variant: ABTestVariant, content: WBContentClient) -> None:
+    async def _apply_variant(self, test: ABTest, variant: ABTestVariant, content: WBContentClient, promotion: WBPromotionClient) -> None:
         state = self._media_state(test)
         if state.get("version") == 1 and state.get("backups"):
-            await self._apply_variant_with_slot_swap(test, variant, content, state)
+            if promotion is None:
+                raise RuntimeError(
+                    "Promotion client is required for the slot-based A/B media flow"
+                )
+
+            await self._apply_variant_with_slot_swap(
+                test,
+                variant,
+                content,
+                state,
+                promotion,
+            )
             return
 
         # Compatibility path for tests and A/B runs created before the slot
@@ -1062,12 +1118,344 @@ class ABTestService:
             variant.position,
         )
 
+    async def _verify_uploaded_image(
+        self,
+        test: ABTest,
+        slot: int,
+        expected_data: bytes,
+        content: WBContentClient,
+        *,
+        attempts: int | None = None,
+        delay_seconds: int | None = None,
+        threshold: int | None = None,
+    ) -> bool:
+
+        attempts = attempts or self.IMAGE_VERIFY_ATTEMPTS
+        delay_seconds = (
+            self.IMAGE_VERIFY_DELAY_SECONDS
+            if delay_seconds is None
+            else delay_seconds
+        )
+        threshold = (
+            self.IMAGE_PHASH_THRESHOLD
+            if threshold is None
+            else threshold
+        )
+
+        expected_hash = self._perceptual_hash(expected_data)
+
+        for attempt in range(1, attempts + 1):
+            try:
+                card = await content.get_card(test.nm_id)
+
+                if not card:
+                    logger.warning(
+                        "WB image verification: card not found "
+                        "test_id=%s nm_id=%s attempt=%s",
+                        test.id,
+                        test.nm_id,
+                        attempt,
+                    )
+                else:
+                    media = card.get("photos") or card.get("media") or []
+
+                    if slot <= len(media):
+                        raw_media = media[slot - 1]
+
+                        if isinstance(raw_media, dict):
+                            url = (
+                                raw_media.get("big")
+                                or raw_media.get("c246x328")
+                                or raw_media.get("c516x688")
+                                or raw_media.get("url")
+                            )
+                        else:
+                            url = str(raw_media)
+
+                        if url:
+                            cdn_data, _ = await content.download_image(
+                                url,
+                                cache_bust=True,
+                            )
+
+                            actual_hash = self._perceptual_hash(cdn_data)
+                            distance = expected_hash - actual_hash
+
+                            logger.info(
+                                "WB image verification "
+                                "test_id=%s nm_id=%s slot=%s "
+                                "attempt=%s distance=%s threshold=%s",
+                                test.id,
+                                test.nm_id,
+                                slot,
+                                attempt,
+                                distance,
+                                threshold,
+                            )
+
+                            if distance <= threshold:
+                                return True
+
+            except Exception as exc:
+                logger.warning(
+                    "WB image verification attempt failed "
+                    "test_id=%s nm_id=%s slot=%s attempt=%s error=%s",
+                    test.id,
+                    test.nm_id,
+                    slot,
+                    attempt,
+                    self._safe_error(exc),
+                )
+
+            if attempt < attempts:
+                await asyncio.sleep(delay_seconds)
+
+        return False
+
+    async def _process_pending_image_retry(
+        self,
+        test: ABTest,
+        content: WBContentClient,
+        promotion: WBPromotionClient,
+    ) -> bool:
+        """
+        Re-upload an image one hour after the first verification failure.
+
+        The campaign must not serve impressions while the image is unresolved.
+        After a successful second verification the existing campaign is started
+        again and status 9 is explicitly confirmed.
+        """
+
+        state = self._media_state(test)
+        pending = state.get("pending") or {}
+        verification = pending.get("verification") or {}
+
+        if verification.get("status") != "waiting_reupload":
+            return False
+
+        next_retry_at = verification.get("next_retry_at")
+
+        if not next_retry_at:
+            return False
+
+        now = self._now().timestamp()
+
+        if now < float(next_retry_at):
+            return True
+
+        reupload_count = int(
+            verification.get("reupload_count") or 0
+        )
+
+        if reupload_count > self.IMAGE_VERIFY_MAX_REUPLOADS:
+            test.status = ABTestStatus.FAILED
+            test.operation_state = (
+                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            )
+            test.incident_id = test.incident_id or self._incident_id()
+
+            raise ABTestReconciliationRequired(
+                "Повторная загрузка изображения уже выполнялась, "
+                "но Wildberries не подтвердил новое фото.",
+                incident_id=test.incident_id,
+            )
+
+        # Before retry, prove that the campaign is not serving.
+        campaign_status = await promotion.get_campaign_status(
+            test.wb_campaign_id,
+            refresh=True,
+        )
+
+        if campaign_status == 9:
+            await self._pause_campaign_confirmed(
+                test,
+                promotion,
+            )
+        elif campaign_status not in {4, 7, 8, 11}:
+            test.operation_state = (
+                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            )
+            test.incident_id = test.incident_id or self._incident_id()
+
+            raise ABTestReconciliationRequired(
+                f"Нельзя безопасно повторить загрузку изображения: "
+                f"статус кампании WB = {campaign_status}.",
+                incident_id=test.incident_id,
+            )
+
+        targets = pending.get("targets") or {}
+
+        for raw_slot in pending.get("slots") or []:
+            slot = int(raw_slot)
+            target = targets.get(str(slot)) or {}
+
+            shadow_path = target.get("shadow_path")
+
+            if not shadow_path:
+                raise ABTestReconciliationRequired(
+                    f"Не найден файл для повторной загрузки слота {slot}",
+                    incident_id=test.incident_id or self._incident_id(),
+                )
+
+            path = self._state_file(str(shadow_path))
+
+            if not path.is_file():
+                raise ABTestReconciliationRequired(
+                    f"Файл для повторной загрузки слота {slot} отсутствует",
+                    incident_id=test.incident_id or self._incident_id(),
+                )
+
+            data = path.read_bytes()
+
+            await content.upload_media_file(
+                nm_id=test.nm_id,
+                photo_number=slot,
+                content=data,
+                filename=target.get("file_name") or path.name,
+                content_type=target.get("mime") or "image/jpeg",
+            )
+
+            verified = await self._verify_uploaded_image(
+                test=test,
+                slot=slot,
+                expected_data=data,
+                content=content,
+                attempts=self.IMAGE_VERIFY_ATTEMPTS,
+                delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+                threshold=self.IMAGE_PHASH_THRESHOLD,
+            )
+
+            if not verified:
+                await self._stop_campaign_confirmed(
+                    test,
+                    promotion,
+                )
+
+                test.status = ABTestStatus.FAILED
+                test.campaign_state = "stopped"
+                test.operation_state = (
+                    ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                )
+                test.media_status = "unknown"
+                test.incident_id = (
+                    test.incident_id or self._incident_id()
+                )
+
+                test.last_error = (
+                    "Реклама остановлена: Wildberries не подтвердил "
+                    "замену изображения после повторной загрузки. "
+                    f"Инцидент {test.incident_id}."
+                )[:2000]
+
+                await self.db.commit()
+
+                raise ABTestReconciliationRequired(
+                    test.last_error,
+                    incident_id=test.incident_id,
+                )
+
+        # Second verification succeeded.
+        state["shadows"] = {
+            **(state.get("shadows") or {}),
+            **{
+                str(slot): {
+                    "path": str(targets[str(slot)]["shadow_path"]),
+                    "mime": targets[str(slot)].get("mime") or "image/jpeg",
+                    "file_name": targets[str(slot)].get("file_name") or f"slot_{slot}.jpg",
+                }
+                for slot in pending.get("slots") or []
+            },
+        }
+
+        variant_position = int(
+            pending.get("variant_position")
+            or test.current_variant_order
+            or 1
+        )
+
+        state["pending"] = None
+        state["current_variant_position"] = variant_position
+        state["status"] = "variant_applied"
+        state["expected_slot_count"] = int(
+            state.get("slot_count")
+            or len(state.get("backups") or {})
+        )
+        state["expected_snapshot"] = {
+            str(slot): {
+                "url": (
+                    state.get("backups") or {}
+                ).get(str(slot), {}).get("url") or ""
+            }
+            for slot in range(
+                1,
+                int(state["expected_slot_count"]) + 1,
+            )
+        }
+
+        test.current_variant_order = variant_position
+        test.media_status = "variant_applied"
+
+
+        await self._set_media_state(test, state)
+
+        # Resume the SAME campaign after media verification.
+        campaign_status = await promotion.get_campaign_status(
+            test.wb_campaign_id,
+            refresh=True,
+        )
+
+        if campaign_status in self.RESUMABLE_CAMPAIGN_STATUSES:
+            test.campaign_state = "starting"
+            await self.db.flush()
+
+            await promotion.start_campaign(
+                test.wb_campaign_id
+            )
+
+            campaign_status = await self._confirm_campaign_active(
+                promotion,
+                test.wb_campaign_id,
+            )
+
+        if campaign_status != 9:
+            test.operation_state = (
+                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            )
+            test.incident_id = test.incident_id or self._incident_id()
+
+            raise ABTestReconciliationRequired(
+                "Изображение подтверждено, но повторный запуск "
+                "существующей кампании WB не подтверждён.",
+                incident_id=test.incident_id,
+            )
+
+        test.status = ABTestStatus.RUNNING
+        test.campaign_state = "running"
+        test.operation_state = (
+            ABTestOperationStatus.SUCCEEDED.value
+        )
+        test.media_status = "variant_applied"
+        test.last_error = None
+        test.incident_id = None
+
+        logger.info(
+            "WB image reupload verified and campaign resumed "
+            "test_id=%s nm_id=%s variant=%s",
+            test.id,
+            test.nm_id,
+            variant_position,
+        )
+
+        return True
+
+
     async def _apply_variant_with_slot_swap(
         self,
         test: ABTest,
         variant: ABTestVariant,
         content: WBContentClient,
         state: dict[str, Any],
+        promotion: WBPromotionClient,
     ) -> None:
         source_slot = self._source_slot(state, variant)
         if source_slot:
@@ -1081,8 +1469,38 @@ class ABTestService:
         self._validate_image(filename, mime, data)
 
         changed_slots: set[int] = {1}
-        current_main, current_main_mime, current_main_name = self._read_state_slot(state, 1)
-        targets: dict[int, tuple[bytes, str, str]] = {1: (data, mime, filename)}
+
+        current_main, current_main_mime, current_main_name = self._read_state_slot(
+            state,
+            1,
+        )
+
+        # Additional safety check:
+        # make sure the new image is actually different from the current main image.
+        old_new_similar, old_new_distance = self._images_similar(
+            current_main,
+            data,
+            threshold=10,
+        )
+
+        logger.info(
+            "AB image old/new comparison "
+            "test_id=%s nm_id=%s position=%s distance=%s similar=%s",
+            test.id,
+            test.nm_id,
+            variant.position,
+            old_new_distance,
+            old_new_similar,
+        )
+
+        if old_new_similar:
+            raise RuntimeError(
+                "Yangi rasm joriy rasmdan yetarlicha farq qilmaydi"
+            )
+
+        targets: dict[int, tuple[bytes, str, str]] = {
+            1: (data, mime, filename)
+        }
         kind = "replace"
 
         if variant.source_type == "card" and source_slot and source_slot != 1:
@@ -1120,7 +1538,19 @@ class ABTestService:
             "kind": kind,
             "variant_position": variant.position,
             "slots": sorted(changed_slots),
-            "targets": {str(slot): {key: value for key, value in meta.items()} for slot, meta in target_meta.items()},
+            "targets": {
+                str(slot): {
+                    key: value
+                    for key, value in meta.items()
+                }
+                for slot, meta in target_meta.items()
+            },
+            "verification": {
+                "status": "pending",
+                "attempt": 0,
+                "reupload_count": 0,
+                "next_retry_at": None,
+            },
         }
         await self._set_media_state(test, state)
 
@@ -1131,6 +1561,7 @@ class ABTestService:
         # upload is enough; no CDN/card read-back is part of the operation.
         for slot in upload_order:
             slot_data, slot_mime, slot_name = targets[slot]
+
             await content.upload_media_file(
                 nm_id=test.nm_id,
                 photo_number=slot,
@@ -1138,6 +1569,64 @@ class ABTestService:
                 filename=slot_name,
                 content_type=slot_mime,
             )
+
+            verified = await self._verify_uploaded_image(
+                test=test,
+                slot=slot,
+                expected_data=slot_data,
+                content=content,
+                attempts=self.IMAGE_VERIFY_ATTEMPTS,
+                delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+                threshold=self.IMAGE_PHASH_THRESHOLD,
+            )
+
+            if not verified:
+                pending = state.get("pending") or {}
+                verification = pending.get("verification") or {}
+
+                reupload_count = int(
+                    verification.get("reupload_count") or 0
+                )
+
+                if reupload_count < self.IMAGE_VERIFY_MAX_REUPLOADS:
+                    verification["status"] = "waiting_reupload"
+                    verification["reupload_count"] = reupload_count + 1
+                    verification["next_retry_at"] = (
+                        self._now().timestamp()
+                        + self.IMAGE_REUPLOAD_DELAY_SECONDS
+                    )
+
+                    pending["verification"] = verification
+                    state["pending"] = pending
+                    state["status"] = "waiting_image_reupload"
+
+                    test.media_status = "waiting_image_reupload"
+
+                    await self._set_media_state(test, state)
+
+                    # The image is not confirmed. Pause the campaign before
+                    # leaving the worker to retry the upload one hour later.
+                    if promotion is not None:
+                        await self._pause_campaign_confirmed(
+                            test,
+                            promotion,
+                        )
+
+                    logger.warning(
+                        "WB image verification failed; reupload scheduled "
+                        "test_id=%s nm_id=%s slot=%s retry_in=%ss",
+                        test.id,
+                        test.nm_id,
+                        slot,
+                        self.IMAGE_REUPLOAD_DELAY_SECONDS,
+                    )
+
+                    return
+
+                raise ABTestReconciliationRequired(
+                    f"WB не подтвердил обновление изображения "
+                    f"слота {slot} после повторной загрузки"
+                )
         state["shadows"] = {**(state.get("shadows") or {}), **shadow_entries}
         state["pending"] = None
         state["current_variant_position"] = variant.position
@@ -1222,6 +1711,7 @@ class ABTestService:
             # used to decide whether the restoration succeeded.
             for slot in restore_order:
                 target = targets[slot]
+
                 await content.upload_media_file(
                     nm_id=test.nm_id,
                     photo_number=slot,
@@ -1229,6 +1719,27 @@ class ABTestService:
                     filename=target["filename"],
                     content_type=target["mime"],
                 )
+
+                verified = await self._verify_uploaded_image(
+                    test=test,
+                    slot=slot,
+                    expected_data=target["data"],
+                    content=content,
+                    attempts=self.IMAGE_VERIFY_ATTEMPTS,
+                    delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+                    threshold=self.IMAGE_PHASH_THRESHOLD,
+                )
+
+                if not verified:
+                    test.media_status = "unknown"
+                    state["status"] = "restore_verification_failed"
+                    await self._set_media_state(test, state)
+
+                    raise ABTestReconciliationRequired(
+                        f"Исходное изображение слота {slot} "
+                        "не подтверждено после восстановления.",
+                        incident_id=test.incident_id or self._incident_id(),
+                    )
             state["shadows"] = {
                 str(slot): {
                     "path": (state.get("backups") or {})[str(slot)]["path"],
@@ -1260,13 +1771,32 @@ class ABTestService:
         elif test.original_main_backup_path:
             path = self._media_root() / test.original_main_backup_path
             if path.is_file():
+                data = path.read_bytes()
+                mime = mimetypes.guess_type(path.name)[0] or "image/jpeg"
+
                 await content.upload_media_file(
                     nm_id=test.nm_id,
                     photo_number=1,
-                    content=path.read_bytes(),
+                    content=data,
                     filename=path.name,
-                    content_type=mimetypes.guess_type(path.name)[0] or "image/jpeg",
+                    content_type=mime,
                 )
+
+                verified = await self._verify_uploaded_image(
+                    test=test,
+                    slot=1,
+                    expected_data=data,
+                    content=content,
+                    attempts=self.IMAGE_VERIFY_ATTEMPTS,
+                    delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+                    threshold=self.IMAGE_PHASH_THRESHOLD,
+                )
+
+                if not verified:
+                    raise ABTestReconciliationRequired(
+                        "Исходное главное изображение не подтверждено после восстановления.",
+                        incident_id=test.incident_id or self._incident_id(),
+                    )
         else:
             raise RuntimeError("У теста отсутствует резервная копия исходных изображений")
 
@@ -1275,6 +1805,141 @@ class ABTestService:
             test.id,
             test.nm_id,
             len(original),
+        )
+
+    async def _pause_campaign_confirmed(
+        self,
+        test: ABTest,
+        promotion: WBPromotionClient,
+    ) -> int | None:
+        """
+        Pause an active WB campaign and confirm status 11.
+
+        HTTP 200 from /adv/v0/pause only means that WB accepted the request.
+        The campaign is considered paused only after promotion/count reports 11.
+        """
+        campaign_id = test.wb_campaign_id
+
+        if not campaign_id:
+            test.campaign_state = "not_created"
+            return None
+
+        try:
+            initial_status = await promotion.get_campaign_status(
+                campaign_id,
+                refresh=True,
+            )
+        except Exception as exc:
+            test.campaign_state = "unknown"
+            test.operation_state = (
+                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            )
+            test.incident_id = test.incident_id or self._incident_id()
+
+            raise ABTestReconciliationRequired(
+                "Не удалось определить текущий статус рекламной кампании "
+                "перед изменением изображения. Операция остановлена.",
+                incident_id=test.incident_id,
+            ) from exc
+
+        # Already paused.
+        if initial_status == 11:
+            test.campaign_state = "paused"
+            return 11
+
+        # Campaign is not serving. It is already safe to modify media.
+        if initial_status in {4, 7, 8, -1}:
+            test.campaign_state = "paused"
+            return initial_status
+
+        # We only send pause when WB confirms that campaign is active.
+        if initial_status != 9:
+            test.campaign_state = "unknown"
+            test.operation_state = (
+                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            )
+            test.incident_id = test.incident_id or self._incident_id()
+
+            raise ABTestReconciliationRequired(
+                f"Нельзя безопасно изменить изображение: "
+                f"Wildberries вернул неожиданный статус кампании "
+                f"{initial_status}.",
+                incident_id=test.incident_id,
+            )
+
+        test.campaign_state = "pause_requested"
+        await self.db.flush()
+
+        pause_error: Exception | None = None
+
+        try:
+            await promotion.pause_campaign(campaign_id)
+        except Exception as exc:
+            pause_error = exc
+
+        last_status: int | None = None
+        last_error: Exception | None = None
+
+        for attempt, delay in enumerate(
+            self.CAMPAIGN_PAUSE_CONFIRM_DELAYS
+        ):
+            if delay:
+                await asyncio.sleep(delay)
+
+            try:
+                last_status = await promotion.get_campaign_status(
+                    campaign_id,
+                    refresh=True,
+                )
+                last_error = None
+            except Exception as exc:
+                last_error = exc
+                logger.warning(
+                    "WB campaign status read failed after pause "
+                    "campaign_id=%s attempt=%s/%s error=%s",
+                    campaign_id,
+                    attempt + 1,
+                    len(self.CAMPAIGN_PAUSE_CONFIRM_DELAYS),
+                    self._safe_error(exc),
+                )
+                continue
+
+            if last_status == 11:
+                test.campaign_state = "paused"
+                return 11
+
+            # If WB moved it into another known non-serving state,
+            # it is still safe to modify the media.
+            if last_status in {4, 7, 8, -1}:
+                test.campaign_state = "paused"
+                return last_status
+
+        test.campaign_state = (
+            "running" if last_status == 9 else "unknown"
+        )
+        test.operation_state = (
+            ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+        )
+        test.incident_id = test.incident_id or self._incident_id()
+
+        message = (
+            "Wildberries не подтвердил остановку показов перед "
+            "изменением изображения."
+        )
+
+        if pause_error:
+            message += (
+                f" Причина запроса: {self._safe_error(pause_error)}."
+            )
+
+        if last_error and last_status is None:
+            message += (
+                f" Причина проверки: {self._safe_error(last_error)}."
+            )
+
+        raise ABTestReconciliationRequired(
+            message,
+            incident_id=test.incident_id,
         )
 
     async def _stop_campaign_confirmed(self, test: ABTest, promotion: WBPromotionClient) -> None:
@@ -1875,7 +2540,7 @@ class ABTestService:
                     # but the read-model poll fails, cleanup must restore the
                     # original card as well.
                     media_changed = True
-                    await self._apply_variant(test, first, content)
+                    await self._apply_variant(test, first, content, promotion)
                     test.current_variant_order = 1
                 else:
                     control = self._variant_by_position(test, 0)
@@ -2095,7 +2760,7 @@ class ABTestService:
                 # main image. The upload response is authoritative; the
                 # service deliberately does not add a digest/fingerprint or
                 # CDN read-back check to this flow.
-                await self._apply_variant(test, winner, content)
+                await self._apply_variant(test, winner, content, promotion)
             except Exception as exc:
                 winner_media_error = exc
                 try:
@@ -2196,15 +2861,15 @@ class ABTestService:
         self,
         test: ABTest,
         content: WBContentClient,
+        promotion: WBPromotionClient,
     ) -> bool:
         """Replay an interrupted variant write from local shadow files.
 
-        A worker can stop after WB accepted one of several slot writes. The
-        journal therefore stores the exact local payload for every slot. On
-        recovery we replay those idempotent slot writes; no card read-back,
-        URL comparison, ordinal comparison, digest, or fingerprint check is
-        involved. The only fingerprint retained by this service is the
-        start-request idempotency key; it is unrelated to image content.
+        A worker can stop after WB accepted one of several slot writes.
+        The journal stores the exact local payload for every slot.
+        Recovery replays the pending writes and confirms every uploaded
+        image through the same CDN/pHash verification used by the normal
+        A/B flow.
         """
         state = self._media_state(test)
         pending = state.get("pending")
@@ -2248,6 +2913,46 @@ class ABTestService:
                 content_type=mime,
             )
 
+            verified = await self._verify_uploaded_image(
+                test=test,
+                slot=slot,
+                expected_data=data,
+                content=content,
+                attempts=self.IMAGE_VERIFY_ATTEMPTS,
+                delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+                threshold=self.IMAGE_PHASH_THRESHOLD,
+            )
+
+            if not verified:
+                await self._pause_campaign_confirmed(
+                    test,
+                    promotion,
+                )
+
+                test.media_status = "waiting_image_reupload"
+
+                verification = (
+                    state.get("pending", {})
+                    .get("verification", {})
+                )
+
+                verification["status"] = "waiting_reupload"
+                verification["reupload_count"] = max(
+                    int(verification.get("reupload_count") or 0),
+                    1,
+                )
+                verification["next_retry_at"] = (
+                    self._now().timestamp()
+                    + self.IMAGE_REUPLOAD_DELAY_SECONDS
+                )
+
+                state["pending"]["verification"] = verification
+                state["status"] = "waiting_image_reupload"
+
+                await self._set_media_state(test, state)
+
+                return False
+
         state["shadows"] = {
             **(state.get("shadows") or {}),
             **{
@@ -2260,9 +2965,30 @@ class ABTestService:
             },
         }
         state["pending"] = None
-        state["current_variant_position"] = int(pending.get("variant_position") or test.current_variant_order or 1)
+        state["current_variant_position"] = int(
+            pending.get("variant_position")
+            or test.current_variant_order
+            or 1
+        )
+
         state["status"] = "variant_applied"
-        state["expected_slot_count"] = int(state.get("slot_count") or len(state.get("backups") or {}))
+
+        state["expected_slot_count"] = int(
+            state.get("slot_count")
+            or len(state.get("backups") or {})
+        )
+
+        state["expected_snapshot"] = {
+            str(slot): {
+                "url": (
+                    state.get("backups") or {}
+                ).get(str(slot), {}).get("url") or ""
+            }
+            for slot in range(
+                1,
+                int(state["expected_slot_count"]) + 1,
+            )
+        }
         test.current_variant_order = int(state["current_variant_position"])
         test.media_status = "variant_applied"
         await self._set_media_state(test, state)
@@ -2314,7 +3040,7 @@ class ABTestService:
                 latest = await self.repository.get_latest_operation(test.id)
                 phase = (latest.response_snapshot or {}).get("phase") if latest else None
                 if test.wb_campaign_id:
-                    recovered_media = await self._recover_pending_variant_media(test, content)
+                    recovered_media = await self._recover_pending_variant_media(test, content, promotion)
                     if recovered_media:
                         campaign_status = await promotion.get_campaign_status(test.wb_campaign_id, refresh=True)
                         if campaign_status in self.RESUMABLE_CAMPAIGN_STATUSES:
@@ -2458,6 +3184,16 @@ class ABTestService:
     async def _sync_loaded(self, test: ABTest) -> None:
         connection = test.connection
         content, promotion = await self._clients(connection)
+        if test.media_status == "waiting_image_reupload":
+            handled = await self._process_pending_image_retry(
+                test,
+                content,
+                promotion,
+            )
+
+            if handled:
+                await self.db.commit()
+                return
         if not test.wb_campaign_id:
             raise RuntimeError("У теста отсутствует ID рекламной кампании WB")
         started_at = test.started_at.date() if test.started_at else None
@@ -2480,15 +3216,17 @@ class ABTestService:
         has_data = bool(totals.get("_has_data", any(available.values())))
         if not has_data:
             test.stats_quality = "no_data"
-            test.last_synced_at = self._now()
             return
         # The spend ceiling cannot be enforced when WB omits the spend
         # metric. Keep the experiment on the current stage until a complete
         # snapshot arrives instead of silently serving beyond the approved
         # budget.
-        if not available.get("views") or not available.get("clicks") or not available.get("sum"):
+        if (
+            not available.get("views")
+            or not available.get("clicks")
+            or not available.get("sum")
+        ):
             test.stats_quality = "incomplete"
-            test.last_synced_at = self._now()
             return
 
         raw_views = int(totals.get("views", 0))
@@ -2657,7 +3395,50 @@ class ABTestService:
                     # adv/v0/stop here is unsafe: WB rejects it when the
                     # campaign is already transitioning or not stoppable and
                     # the test then gets a false "stopped" incident.
-                    await self._apply_variant(test, next_variant, content)
+                    # A running campaign must be paused before changing the
+                    # product image. A successful pause request alone is not enough;
+                    # status 11 must be confirmed through WB read-back.
+                    await self._pause_campaign_confirmed(
+                        test,
+                        promotion,
+                    )
+
+                    await self._apply_variant(
+                        test,
+                        next_variant,
+                        content,
+                        promotion,
+                    )
+
+                    # _apply_variant confirms the image through CDN/pHash.
+                    # If the image was not confirmed it schedules the one-hour
+                    # retry and returns without resuming the campaign.
+                    if test.media_status == "waiting_image_reupload":
+                        return
+
+                    test.campaign_state = "starting"
+
+                    await promotion.start_campaign(
+                        test.wb_campaign_id,
+                    )
+
+                    campaign_status = await self._confirm_campaign_active(
+                        promotion,
+                        test.wb_campaign_id,
+                    )
+
+                    if campaign_status != 9:
+                        test.operation_state = (
+                            ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                        )
+                        test.incident_id = test.incident_id or self._incident_id()
+
+                        raise ABTestReconciliationRequired(
+                            "Изображение обновлено и подтверждено, "
+                            "но повторный запуск кампании WB не подтверждён.",
+                            incident_id=test.incident_id,
+                        )
+
                     test.campaign_state = "running"
                 except Exception as exc:
                     logger.exception(
@@ -2666,6 +3447,22 @@ class ABTestService:
                         test.nm_id,
                         next_position,
                     )
+                    if isinstance(exc, ABTestReconciliationRequired):
+                        test.status = ABTestStatus.FAILED
+                        test.operation_state = (
+                            ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                        )
+                        test.incident_id = (
+                            test.incident_id or self._incident_id()
+                        )
+                        test.finished_at = self._now()
+                        test.last_error = (
+                            f"Переключение варианта требует сверки. "
+                            f"Инцидент {test.incident_id}. "
+                            f"{self._safe_error(exc)}"
+                        )[:2000]
+
+                        raise
                     cleanup_errors: list[str] = []
                     media_restored = False
                     try:

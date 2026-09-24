@@ -1,0 +1,248 @@
+--- backend/app/services/ab_test_service.py
++++ backend/app/services/ab_test_service.py
+@@ -1557,8 +1557,9 @@
+         # Write the non-main slot first. If the second request fails, the main
+         # photo is still the old one and the full backup can restore both slots.
+         upload_order = [slot for slot in sorted(targets, reverse=True) if slot != 1] + [1]
+-        # One logical operation gets one external write sequence. A successful
+-        # upload is enough; no CDN/card read-back is part of the operation.
++        # One logical operation gets one external write sequence.
++        # Upload success is only the first step; every changed slot is
++        # confirmed through CDN/pHash before the operation is committed.
+         for slot in upload_order:
+             slot_data, slot_mime, slot_name = targets[slot]
+ 
+@@ -1849,7 +1850,7 @@
+ 
+         # Campaign is not serving. It is already safe to modify media.
+         if initial_status in {4, 7, 8, -1}:
+-            test.campaign_state = "paused"
++            test.campaign_state = "stopped"
+             return initial_status
+ 
+         # We only send pause when WB confirms that campaign is active.
+@@ -2865,46 +2866,71 @@
+     ) -> bool:
+         """Replay an interrupted variant write from local shadow files.
+ 
+-        A worker can stop after WB accepted one of several slot writes.
+-        The journal stores the exact local payload for every slot.
+-        Recovery replays the pending writes and confirms every uploaded
+-        image through the same CDN/pHash verification used by the normal
+-        A/B flow.
++        Recovery is safety-sensitive: an active campaign is paused and confirmed
++        before any pending media is uploaded. Every changed slot is verified
++        through CDN/pHash. A verification failure leaves the test in the
++        one-hour reupload retry state.
+         """
+         state = self._media_state(test)
+-        pending = state.get("pending")
+-        if not isinstance(pending, dict) or pending.get("kind") not in {"swap", "replace", "replace_with_parking"}:
+-            return False
+-        raw_targets = pending.get("targets") or {}
+-        if not isinstance(raw_targets, dict) or not raw_targets:
+-            return False
+-        targets = {
+-            int(raw_slot): dict(target)
+-            for raw_slot, target in raw_targets.items()
+-            if isinstance(target, dict)
+-        }
+-        if not targets:
+-            return False
++        pending = state.get("pending") or {}
++        targets = pending.get("targets") or {}
+ 
+         payloads: dict[int, tuple[bytes, str, str]] = {}
+-        for slot, target in targets.items():
++        for slot_text, target in targets.items():
++            slot = int(slot_text)
+             shadow_path = target.get("shadow_path")
+             if not shadow_path:
+-                # Pending records written by the pre-replay implementation do
+-                # not contain enough local data to safely repeat the upload.
+-                return False
+-            path = self._state_file(str(shadow_path))
+-            if not path.is_file():
+-                return False
+-            payloads[slot] = (
+-                path.read_bytes(),
+-                str(target.get("mime") or mimetypes.guess_type(path.name)[0] or "image/jpeg"),
+-                str(target.get("file_name") or path.name),
+-            )
+-
+-        upload_order = [slot for slot in sorted(payloads, reverse=True) if slot != 1] + [1]
++                raise ABTestReconciliationRequired(
++                    f"Recovery uchun shadow file topilmadi: slot={slot}",
++                    incident_id=test.incident_id or self._incident_id(),
++                )
++
++            path = Path(str(shadow_path))
++            if not path.exists():
++                raise ABTestReconciliationRequired(
++                    f"Recovery uchun shadow file mavjud emas: {path}",
++                    incident_id=test.incident_id or self._incident_id(),
++                )
++
++            mime = str(target.get("mime") or "image/jpeg")
++            filename = str(target.get("file_name") or path.name)
++            payloads[slot] = (path.read_bytes(), mime, filename)
++
++        if not payloads:
++            return False
++
++        campaign_status = await promotion.get_campaign_status(
++            test.wb_campaign_id,
++            refresh=True,
++        )
++
++        if campaign_status == 9:
++            await self._pause_campaign_confirmed(
++                test,
++                promotion,
++            )
++        elif campaign_status not in {4, 7, 8, 11}:
++            incident_id = test.incident_id or self._incident_id()
++            test.incident_id = incident_id
++            raise ABTestReconciliationRequired(
++                f"Recovery uchun campaign holati xavfsiz emas: {campaign_status}",
++                incident_id=incident_id,
++            )
++
++        upload_order = [
++            slot for slot in sorted(payloads, reverse=True) if slot != 1
++        ] + ([1] if 1 in payloads else [])
++
++        pending_variant_position = int(
++            pending.get("variant_position")
++            or state.get("current_variant_position")
++            or test.current_variant_order
++            or 1
++        )
++
+         for slot in upload_order:
+             data, mime, filename = payloads[slot]
++
+             await content.upload_media_file(
+                 nm_id=test.nm_id,
+                 photo_number=slot,
+@@ -2914,70 +2940,53 @@
+             )
+ 
+             verified = await self._verify_uploaded_image(
+-            test=test,
+-            slot=slot,
+-            expected_data=data,
+-            content=content,
+-            attempts=self.IMAGE_VERIFY_ATTEMPTS,
+-            delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+-            threshold=self.IMAGE_PHASH_THRESHOLD,
+-        )
+-
+-        if not verified:
+-            await self._pause_campaign_confirmed(
+-                test,
+-                promotion,
+-            )
+-
+-            test.media_status = "waiting_image_reupload"
+-
+-            verification = (
+-                state.get("pending", {})
+-                .get("verification", {})
+-            )
+-
+-            verification["status"] = "waiting_reupload"
+-            verification["reupload_count"] = max(
+-                int(verification.get("reupload_count") or 0),
+-                1,
+-            )
+-            verification["next_retry_at"] = (
+-                self._now().timestamp()
+-                + self.IMAGE_REUPLOAD_DELAY_SECONDS
+-            )
+-
+-            state["pending"]["verification"] = verification
+-            state["status"] = "waiting_image_reupload"
+-
+-            await self._set_media_state(test, state)
+-
+-            return False
+-
+-        state["shadows"] = {
+-            **(state.get("shadows") or {}),
+-            **{
+-                str(slot): {
+-                    "path": str(targets[slot]["shadow_path"]),
+-                    "mime": payloads[slot][1],
+-                    "file_name": payloads[slot][2],
+-                }
+-                for slot in payloads
+-            },
+-        }
++                test=test,
++                slot=slot,
++                expected_data=data,
++                content=content,
++                attempts=self.IMAGE_VERIFY_ATTEMPTS,
++                delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
++                threshold=self.IMAGE_PHASH_THRESHOLD,
++            )
++
++            if not verified:
++                test.media_status = "waiting_image_reupload"
++
++                verification = (
++                    pending.get("verification") or {}
++                )
++                verification["status"] = "waiting_reupload"
++                verification["reupload_count"] = max(
++                    int(verification.get("reupload_count") or 0),
++                    1,
++                )
++                verification["next_retry_at"] = (
++                    self._now().timestamp()
++                    + self.IMAGE_REUPLOAD_DELAY_SECONDS
++                )
++
++                pending["verification"] = verification
++                state["pending"] = pending
++                state["status"] = "waiting_image_reupload"
++
++                await self._set_media_state(test, state)
++                await self.db.commit()
++                return False
++
++            shadow = targets.get(str(slot))
++            if shadow:
++                state.setdefault("shadows", {})[str(slot)] = dict(shadow)
++
+         state["pending"] = None
+-        state["current_variant_position"] = int(
+-            pending.get("variant_position")
+-            or test.current_variant_order
+-            or 1
+-        )
+-
+         state["status"] = "variant_applied"
++        state["current_variant_position"] = pending_variant_position
++        test.current_variant_order = pending_variant_position
++        test.media_status = "variant_applied"
+ 
+         state["expected_slot_count"] = int(
+             state.get("slot_count")
+             or len(state.get("backups") or {})
+         )
+-
+         state["expected_snapshot"] = {
+             str(slot): {
+                 "url": (
+@@ -2989,8 +2998,7 @@
+                 int(state["expected_slot_count"]) + 1,
+             )
+         }
+-        test.current_variant_order = int(state["current_variant_position"])
+-        test.media_status = "variant_applied"
++
+         await self._set_media_state(test, state)
+         return True
+ 

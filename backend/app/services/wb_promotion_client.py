@@ -441,6 +441,9 @@ class WBPromotionClient:
     async def start_campaign(self, campaign_id: int) -> Any:
         return await self._request("GET", "/adv/v0/start", params={"id": int(campaign_id)})
 
+    async def pause_campaign(self, campaign_id: int) -> Any:
+        return await self._request("GET", "/adv/v0/pause", params={"id": int(campaign_id)})
+
     async def stop_campaign(self, campaign_id: int) -> Any:
         return await self._request("GET", "/adv/v0/stop", params={"id": int(campaign_id)})
 
