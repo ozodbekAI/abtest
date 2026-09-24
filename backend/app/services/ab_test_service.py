@@ -2128,20 +2128,22 @@ class ABTestService:
             # minimum CPM). Verify that exact campaign before allowing a
             # resume. Never create a second campaign for this situation.
             latest_operation = await self.repository.get_latest_operation(test.id)
-            # A resume request from an older UI may omit the source and arrive
-            # as ``auto``. Reuse the source that the user confirmed for the
-            # existing operation instead of silently switching between the
-            # Promotion account, mutual settlements, and promo bonus.
+
             selected_funding_source = request.funding_source
-            saved_funding_source = (latest_operation.request_snapshot or {}).get("funding_source") if latest_operation else None
-            if selected_funding_source == "auto" and saved_funding_source in {"account", "mutual", "bonus"}:
-                selected_funding_source = saved_funding_source
+
             if request.auto_deposit and selected_funding_source == "auto":
-                # Never let an older client silently fall back from the
-                # user's intended source to account/mutual settlement. A
-                # deposit is an irreversible external money operation, so a
-                # fresh explicit confirmation is required when no source was
-                # saved with the original start request.
+                operations = await self.repository.list_operations(test.id)
+
+                for previous_operation in operations:
+                    saved_funding_source = (
+                        previous_operation.request_snapshot or {}
+                    ).get("funding_source")
+
+                    if saved_funding_source in {"account", "mutual", "bonus"}:
+                        selected_funding_source = saved_funding_source
+                        break
+
+            if request.auto_deposit and selected_funding_source == "auto":
                 raise HTTPException(
                     status_code=400,
                     detail={
@@ -2150,7 +2152,9 @@ class ABTestService:
                             "Для автоматического пополнения выберите источник средств: "
                             "счёт Продвижения, баланс взаиморасчётов или промо-бонусы WB."
                         ),
-                        "campaign_id": int(test.wb_campaign_id) if test.wb_campaign_id else None,
+                        "campaign_id": int(test.wb_campaign_id)
+                        if test.wb_campaign_id
+                        else None,
                         "reuse_existing_campaign": bool(test.wb_campaign_id),
                     },
                 )

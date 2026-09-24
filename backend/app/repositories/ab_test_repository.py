@@ -1,4 +1,5 @@
 from __future__ import annotations
+from unittest import result
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -79,6 +80,14 @@ class ABTestRepository:
             .where(ABTestOperation.test_id == test_id)
             .order_by(ABTestOperation.id.desc())
         )
+
+    async def list_operations(self, test_id: int) -> list[ABTestOperation]:
+        result = await self.db.scalars(
+            select(ABTestOperation)
+            .where(ABTestOperation.test_id == test_id)
+            .order_by(ABTestOperation.id.desc())
+        )
+        return list(result.all())
 
     async def create_operation(self, **values) -> ABTestOperation:
         operation = ABTestOperation(**values)
