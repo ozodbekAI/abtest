@@ -1151,9 +1151,10 @@ class ABTestService:
         expected_data: bytes,
         content: WBContentClient,
         *,
-        attempts: int | None = None,
-        delay_seconds: int | None = None,
-        threshold: int | None = None,
+        attempts: int = 5,
+        delay_seconds: int = 10,
+        threshold: int = 10,
+        previous_data: bytes | None = None,
     ) -> bool:
 
         attempts = attempts or self.IMAGE_VERIFY_ATTEMPTS
@@ -1207,19 +1208,72 @@ class ABTestService:
                             actual_hash = self._perceptual_hash(cdn_data)
                             distance = expected_hash - actual_hash
 
+                            # First check:
+                            # Is the image served by WB/CDN actually the image we uploaded?
+                            upload_verified = distance <= threshold
+
                             logger.info(
-                                "WB image verification "
-                                "test_id=%s nm_id=%s slot=%s "
-                                "attempt=%s distance=%s threshold=%s",
+                                "WB upload verification "
+                                "test_id=%s nm_id=%s slot=%s attempt=%s "
+                                "distance=%s threshold=%s verified=%s",
                                 test.id,
                                 test.nm_id,
                                 slot,
                                 attempt,
                                 distance,
                                 threshold,
+                                upload_verified,
                             )
 
-                            if distance <= threshold:
+                            if not upload_verified:
+                                logger.warning(
+                                    "WB CDN image does not match uploaded image "
+                                    "test_id=%s nm_id=%s slot=%s attempt=%s "
+                                    "distance=%s threshold=%s",
+                                    test.id,
+                                    test.nm_id,
+                                    slot,
+                                    attempt,
+                                    distance,
+                                    threshold,
+                                )
+                            else:
+                                # Second check:
+                                # Compare the REAL image currently served by WB with
+                                # the image that was active before the upload.
+                                if previous_data is not None:
+                                    old_new_similar, old_new_distance = self._images_similar(
+                                        previous_data,
+                                        cdn_data,
+                                        threshold=threshold,
+                                    )
+
+                                    logger.info(
+                                        "AB image old/new comparison AFTER WB upload "
+                                        "test_id=%s nm_id=%s position=%s "
+                                        "distance=%s similar=%s",
+                                        test.id,
+                                        test.nm_id,
+                                        slot,
+                                        getattr(test, "current_variant_order", None),
+                                        old_new_distance,
+                                        old_new_similar,
+                                    )
+
+                                    if old_new_similar:
+                                        raise RuntimeError(
+                                            "Yangi rasm joriy rasmdan yetarlicha farq qilmaydi"
+                                        )
+
+                                logger.info(
+                                    "WB image verification SUCCESS "
+                                    "test_id=%s nm_id=%s slot=%s attempt=%s distance=%s",
+                                    test.id,
+                                    test.nm_id,
+                                    slot,
+                                    attempt,
+                                    distance,
+                                )
                                 return True
 
             except Exception as exc:
@@ -1501,29 +1555,6 @@ class ABTestService:
             1,
         )
 
-        # Additional safety check:
-        # make sure the new image is actually different from the current main image.
-        old_new_similar, old_new_distance = self._images_similar(
-            current_main,
-            data,
-            threshold=10,
-        )
-
-        logger.warning(
-            "AB image old/new comparison "
-            "test_id=%s nm_id=%s position=%s distance=%s similar=%s",
-            test.id,
-            test.nm_id,
-            variant.position,
-            old_new_distance,
-            old_new_similar,
-        )
-
-        if old_new_similar:
-            raise RuntimeError(
-                "Yangi rasm joriy rasmdan yetarlicha farq qilmaydi"
-            )
-
         targets: dict[int, tuple[bytes, str, str]] = {
             1: (data, mime, filename)
         }
@@ -1601,9 +1632,10 @@ class ABTestService:
                 slot=slot,
                 expected_data=slot_data,
                 content=content,
-                attempts=self.IMAGE_VERIFY_ATTEMPTS,
-                delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
-                threshold=self.IMAGE_PHASH_THRESHOLD,
+                attempts=5,
+                delay_seconds=10,
+                threshold=10,
+                previous_data=current_main if slot == 1 else None,
             )
 
             if not verified:
