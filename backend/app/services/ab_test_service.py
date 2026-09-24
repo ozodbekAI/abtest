@@ -1118,6 +1118,8 @@ class ABTestService:
             variant.position,
         )
 
+        
+
     async def _verify_uploaded_image(
         self,
         test: ABTest,
@@ -1849,7 +1851,7 @@ class ABTestService:
 
         # Campaign is not serving. It is already safe to modify media.
         if initial_status in {4, 7, 8, -1}:
-            test.campaign_state = "paused"
+            test.campaign_state = "stopped"
             return initial_status
 
         # We only send pause when WB confirms that campaign is active.
@@ -2867,44 +2869,127 @@ class ABTestService:
 
         A worker can stop after WB accepted one of several slot writes.
         The journal stores the exact local payload for every slot.
-        Recovery replays the pending writes and confirms every uploaded
-        image through the same CDN/pHash verification used by the normal
-        A/B flow.
+
+        Recovery is safety-sensitive:
+        1. If campaign is active, pause it and confirm status 11.
+        2. Upload every pending slot.
+        3. Verify every uploaded slot through CDN/pHash.
+        4. If verification fails, wait one hour for reupload.
+        5. Only after all slots are verified is the media state committed.
         """
         state = self._media_state(test)
         pending = state.get("pending")
-        if not isinstance(pending, dict) or pending.get("kind") not in {"swap", "replace", "replace_with_parking"}:
+
+        if (
+            not isinstance(pending, dict)
+            or pending.get("kind")
+            not in {"swap", "replace", "replace_with_parking"}
+        ):
             return False
+
         raw_targets = pending.get("targets") or {}
+
         if not isinstance(raw_targets, dict) or not raw_targets:
             return False
+
         targets = {
             int(raw_slot): dict(target)
             for raw_slot, target in raw_targets.items()
             if isinstance(target, dict)
         }
+
         if not targets:
             return False
 
         payloads: dict[int, tuple[bytes, str, str]] = {}
+
         for slot, target in targets.items():
             shadow_path = target.get("shadow_path")
+
             if not shadow_path:
-                # Pending records written by the pre-replay implementation do
-                # not contain enough local data to safely repeat the upload.
                 return False
+
             path = self._state_file(str(shadow_path))
+
             if not path.is_file():
                 return False
+
             payloads[slot] = (
                 path.read_bytes(),
-                str(target.get("mime") or mimetypes.guess_type(path.name)[0] or "image/jpeg"),
-                str(target.get("file_name") or path.name),
+                str(
+                    target.get("mime")
+                    or mimetypes.guess_type(path.name)[0]
+                    or "image/jpeg"
+                ),
+                str(
+                    target.get("file_name")
+                    or path.name
+                ),
             )
 
-        upload_order = [slot for slot in sorted(payloads, reverse=True) if slot != 1] + [1]
+        if not payloads:
+            return False
+
+        # ---------------------------------------------------------
+        # IMPORTANT:
+        # Never modify media while campaign is actively serving.
+        # ---------------------------------------------------------
+
+        campaign_status = await promotion.get_campaign_status(
+            test.wb_campaign_id,
+            refresh=True,
+        )
+
+        if campaign_status == 9:
+            await self._pause_campaign_confirmed(
+                test,
+                promotion,
+            )
+
+        elif campaign_status not in {4, 7, 8, 11}:
+            test.campaign_state = "unknown"
+            test.operation_state = (
+                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            )
+            test.incident_id = (
+                test.incident_id or self._incident_id()
+            )
+
+            raise ABTestReconciliationRequired(
+                f"Recovery uchun campaign holati xavfsiz emas: "
+                f"{campaign_status}",
+                incident_id=test.incident_id,
+            )
+
+        # ---------------------------------------------------------
+        # Preserve variant position before clearing pending state.
+        # ---------------------------------------------------------
+
+        variant_position = int(
+            pending.get("variant_position")
+            or test.current_variant_order
+            or 1
+        )
+
+        upload_order = [
+            slot
+            for slot in sorted(
+                payloads,
+                reverse=True,
+            )
+            if slot != 1
+        ]
+
+        if 1 in payloads:
+            upload_order.append(1)
+
+        # ---------------------------------------------------------
+        # Upload + verify EVERY slot separately.
+        # ---------------------------------------------------------
+
         for slot in upload_order:
             data, mime, filename = payloads[slot]
+
             await content.upload_media_file(
                 nm_id=test.nm_id,
                 photo_number=slot,
@@ -2923,75 +3008,104 @@ class ABTestService:
                 threshold=self.IMAGE_PHASH_THRESHOLD,
             )
 
-            if not verified:
-                await self._pause_campaign_confirmed(
-                    test,
-                    promotion,
-                )
+            # -----------------------------------------------------
+            # First verification failed.
+            # Keep campaign paused and schedule one-hour retry.
+            # -----------------------------------------------------
 
+            if not verified:
                 test.media_status = "waiting_image_reupload"
 
                 verification = (
-                    state.get("pending", {})
-                    .get("verification", {})
+                    pending.get("verification") or {}
                 )
 
                 verification["status"] = "waiting_reupload"
+
                 verification["reupload_count"] = max(
-                    int(verification.get("reupload_count") or 0),
+                    int(
+                        verification.get(
+                            "reupload_count"
+                        ) or 0
+                    ),
                     1,
                 )
+
                 verification["next_retry_at"] = (
                     self._now().timestamp()
                     + self.IMAGE_REUPLOAD_DELAY_SECONDS
                 )
 
-                state["pending"]["verification"] = verification
+                pending["verification"] = verification
+
+                state["pending"] = pending
                 state["status"] = "waiting_image_reupload"
 
-                await self._set_media_state(test, state)
+                await self._set_media_state(
+                    test,
+                    state,
+                )
+
+                await self.db.commit()
 
                 return False
 
-        state["shadows"] = {
-            **(state.get("shadows") or {}),
-            **{
-                str(slot): {
-                    "path": str(targets[slot]["shadow_path"]),
-                    "mime": payloads[slot][1],
-                    "file_name": payloads[slot][2],
-                }
-                for slot in payloads
-            },
-        }
-        state["pending"] = None
-        state["current_variant_position"] = int(
-            pending.get("variant_position")
-            or test.current_variant_order
-            or 1
-        )
+            # -----------------------------------------------------
+            # Slot verified successfully.
+            # Save shadow information.
+            # -----------------------------------------------------
 
+            state.setdefault(
+                "shadows",
+                {},
+            )[str(slot)] = {
+                "path": str(
+                    targets[slot]["shadow_path"]
+                ),
+                "mime": mime,
+                "file_name": filename,
+            }
+
+        # ---------------------------------------------------------
+        # ALL slots verified successfully.
+        # ---------------------------------------------------------
+
+        state["pending"] = None
+        state["current_variant_position"] = variant_position
         state["status"] = "variant_applied"
 
         state["expected_slot_count"] = int(
             state.get("slot_count")
-            or len(state.get("backups") or {})
+            or len(
+                state.get("backups") or {}
+            )
         )
 
         state["expected_snapshot"] = {
             str(slot): {
                 "url": (
                     state.get("backups") or {}
-                ).get(str(slot), {}).get("url") or ""
+                ).get(
+                    str(slot),
+                    {},
+                ).get("url") or ""
             }
             for slot in range(
                 1,
-                int(state["expected_slot_count"]) + 1,
+                int(
+                    state["expected_slot_count"]
+                ) + 1,
             )
         }
-        test.current_variant_order = int(state["current_variant_position"])
+
+        test.current_variant_order = variant_position
         test.media_status = "variant_applied"
-        await self._set_media_state(test, state)
+
+        await self._set_media_state(
+            test,
+            state,
+        )
+
         return True
 
     async def _mark_recovered_running(
@@ -3040,21 +3154,79 @@ class ABTestService:
                 latest = await self.repository.get_latest_operation(test.id)
                 phase = (latest.response_snapshot or {}).get("phase") if latest else None
                 if test.wb_campaign_id:
-                    recovered_media = await self._recover_pending_variant_media(test, content, promotion)
-                    if recovered_media:
-                        campaign_status = await promotion.get_campaign_status(test.wb_campaign_id, refresh=True)
-                        if campaign_status in self.RESUMABLE_CAMPAIGN_STATUSES:
-                            await promotion.start_campaign(test.wb_campaign_id)
-                            campaign_status = await self._confirm_campaign_active(promotion, test.wb_campaign_id)
-                        if campaign_status == 9:
-                            await self._mark_recovered_running(test, latest, test.wb_campaign_id)
-                            await self.db.commit()
-                            return await self.repository.get_for_user(user_id, test_id)  # type: ignore[return-value]
-                        raise ABTestReconciliationRequired(
-                            "Изображения восстановлены, но активный статус существующей кампании ещё не подтверждён.",
-                            incident_id=test.incident_id or self._incident_id(),
+                    recovered_media = await self._recover_pending_variant_media(
+                        test,
+                        content,
+                        promotion,
+                    )
+
+                    state = self._media_state(test)
+
+                    # Recovery verification failed.
+                    # Keep the campaign paused and let the scheduler
+                    # perform the one-hour image reupload retry.
+                    if state.get("status") == "waiting_image_reupload":
+                        test.status = ABTestStatus.RUNNING
+                        test.campaign_state = "paused"
+                        test.operation_state = (
+                            ABTestOperationStatus.IN_PROGRESS.value
                         )
-                    await self._stop_campaign_confirmed(test, promotion)
+
+                        await self.db.commit()
+
+                        return await self.repository.get_for_user(
+                            user_id,
+                            test_id,
+                        )  # type: ignore[return-value]
+
+                    if recovered_media:
+                        campaign_status = await promotion.get_campaign_status(
+                            test.wb_campaign_id,
+                            refresh=True,
+                        )
+
+                        if campaign_status in self.RESUMABLE_CAMPAIGN_STATUSES:
+                            test.campaign_state = "starting"
+
+                            await promotion.start_campaign(
+                                test.wb_campaign_id,
+                            )
+
+                            campaign_status = (
+                                await self._confirm_campaign_active(
+                                    promotion,
+                                    test.wb_campaign_id,
+                                )
+                            )
+
+                        if campaign_status == 9:
+                            await self._mark_recovered_running(
+                                test,
+                                latest,
+                                test.wb_campaign_id,
+                            )
+
+                            await self.db.commit()
+
+                            return await self.repository.get_for_user(
+                                user_id,
+                                test_id,
+                            )  # type: ignore[return-value]
+
+                        raise ABTestReconciliationRequired(
+                            "Изображения восстановлены, "
+                            "но активный статус существующей "
+                            "кампании ещё не подтверждён.",
+                            incident_id=(
+                                test.incident_id
+                                or self._incident_id()
+                            ),
+                        )
+
+                    await self._stop_campaign_confirmed(
+                        test,
+                        promotion,
+                    )
                 elif test.campaign_state == "unknown" or phase in {
                     "campaign_create_sent",
                     "campaign_created",
@@ -3477,9 +3649,61 @@ class ABTestService:
                     # retry the same variant. Only an unsuccessful rollback
                     # becomes a reconciliation incident.
                     if media_restored:
+                        # The original image was restored, but the campaign
+                        # may still be paused after the safety-first switch.
+                        # Never mark the test RUNNING until WB confirms status 9.
+
+                        campaign_status = (
+                            await promotion.get_campaign_status(
+                                test.wb_campaign_id,
+                                refresh=True,
+                            )
+                        )
+
+                        if campaign_status in self.RESUMABLE_CAMPAIGN_STATUSES:
+                            test.campaign_state = "starting"
+
+                            await promotion.start_campaign(
+                                test.wb_campaign_id,
+                            )
+
+                            campaign_status = (
+                                await self._confirm_campaign_active(
+                                    promotion,
+                                    test.wb_campaign_id,
+                                )
+                            )
+
+                        if campaign_status != 9:
+                            test.status = ABTestStatus.FAILED
+                            test.campaign_state = "stopped"
+                            test.operation_state = (
+                                ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                            )
+                            test.incident_id = (
+                                test.incident_id
+                                or self._incident_id()
+                            )
+                            test.finished_at = self._now()
+
+                            test.last_error = (
+                                "Исходное фото восстановлено, "
+                                "но рекламная кампания WB "
+                                "не подтверждена в статусе 9. "
+                                f"Инцидент {test.incident_id}."
+                            )[:2000]
+
+                            raise ABTestReconciliationRequired(
+                                test.last_error,
+                                incident_id=test.incident_id,
+                            )
+
+                        # Only status 9 means the campaign is actually running.
                         test.status = ABTestStatus.RUNNING
                         test.campaign_state = "running"
-                        test.operation_state = ABTestOperationStatus.SUCCEEDED.value
+                        test.operation_state = (
+                            ABTestOperationStatus.SUCCEEDED.value
+                        )
                         test.finished_at = None
                         test.incident_id = None
                     else:
