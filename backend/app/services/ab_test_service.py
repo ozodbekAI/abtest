@@ -1159,49 +1159,35 @@ class ABTestService:
             "file_name": filename or target.name,
         }
 
-    async def _apply_variant(self, test: ABTest, variant: ABTestVariant, content: WBContentClient, promotion: WBPromotionClient) -> None:
-        state = self._media_state(test)
-        if state.get("version") == 1 and state.get("backups"):
-            if promotion is None:
-                raise RuntimeError(
-                    "Promotion client is required for the slot-based A/B media flow"
+    async def _apply_variant(
+            self,
+            test: ABTest,
+            variant: ABTestVariant,
+            content: WBContentClient,
+            promotion: WBPromotionClient,
+        ) -> None:
+            state = self._media_state(test)
+
+            if state.get("version") == 1 and state.get("backups"):
+                if promotion is None:
+                    raise RuntimeError(
+                        "Promotion client is required for the slot-based A/B media flow"
+                    )
+
+                await self._apply_variant_with_slot_swap(
+                    test,
+                    variant,
+                    content,
+                    state,
+                    promotion,
                 )
+                return
 
-            await self._apply_variant_with_slot_swap(
-                test,
-                variant,
-                content,
-                state,
-                promotion,
+            raise ABTestReconciliationRequired(
+                "A/B test использует устаревшее состояние media_state "
+                "и не может безопасно продолжить смену изображения.",
+                incident_id=test.incident_id or self._incident_id(),
             )
-            return
-
-        # Compatibility path for tests and A/B runs created before the slot
-        # state migration. New runs always use the exact slot engine above.
-        data, mime, filename = await self._variant_bytes(test, variant, content)
-        # Uploaded files are already prepared before persistence. Keep this
-        # final guard synchronous so the polling worker remains deterministic
-        # when a remote/card source also happens to be a TIFF.
-        filename, mime, data = self._prepare_image(filename, mime, data, verify_integrity=False)
-        self._validate_image(filename, mime, data)
-        logger.info(
-            "A/B apply variant test_id=%s nm_id=%s position=%s source=%s bytes=%s",
-            test.id,
-            test.nm_id,
-            variant.position,
-            variant.source_type,
-            len(data),
-        )
-        await content.upload_media_file(nm_id=test.nm_id, photo_number=1, content=data, filename=filename, content_type=mime)
-        # The successful upload response is authoritative. The card is not
-        # read back here: WB can expose a stale CDN list or renumber photos
-        # after a successful write, which must not stop a running test.
-        logger.info(
-            "A/B variant upload accepted test_id=%s nm_id=%s position=%s",
-            test.id,
-            test.nm_id,
-            variant.position,
-        )
 
         
 
@@ -1552,6 +1538,8 @@ class ABTestService:
             )
 
             if not verified:
+                verification["reupload_count"] = reupload_count + 1
+
                 await self._stop_campaign_confirmed(
                     test,
                     promotion,
@@ -1856,6 +1844,7 @@ class ABTestService:
             },
         }
         await self._set_media_state(test, state)
+        await self.db.commit()
 
         # Write the non-main slot first. If the second request fails, the main
         # photo is still the old one and the full backup can restore both slots.
@@ -2029,6 +2018,7 @@ class ABTestService:
                 },
             }
             await self._set_media_state(test, state)
+            await self.db.commit()
             # Restore secondary slots first and the main slot last so the card
             # never spends a long interval with a new main and an old source.
             restore_order = sorted(targets, reverse=True)
@@ -2870,7 +2860,41 @@ class ABTestService:
                     # but the read-model poll fails, cleanup must restore the
                     # original card as well.
                     media_changed = True
-                    await self._apply_variant(test, first, content, promotion)
+                    await self._apply_variant(
+                        test,
+                        first,
+                        content,
+                        promotion,
+                    )
+
+                    if test.media_status == "waiting_image_reupload":
+                        test.status = ABTestStatus.RUNNING
+                        test.started_at = test.started_at or self._now()
+                        test.finished_at = None
+                        test.campaign_state = "paused"
+                        test.operation_state = (
+                            ABTestOperationStatus.IN_PROGRESS.value
+                        )
+
+                        operation.response_snapshot = {
+                            "phase": "image_reupload_waiting",
+                            "campaign_id": int(campaign_id),
+                            "variant_position": 1,
+                        }
+
+                        await self._operation_state(
+                            test,
+                            operation,
+                            ABTestOperationStatus.IN_PROGRESS,
+                        )
+
+                        await self.db.commit()
+
+                        return await self.repository.get_for_user(
+                            user_id,
+                            test_id,
+                        )
+
                     test.current_variant_order = 1
                 else:
                     control = self._variant_by_position(test, 0)
@@ -3086,18 +3110,36 @@ class ABTestService:
         winner_media_error: Exception | None = None
         if winner and test.keep_winner_as_main:
             try:
-                # Restore first, then apply the selected creative as the final
-                # main image. The upload response is authoritative; the
-                # service deliberately does not add a digest/fingerprint or
-                # CDN read-back check to this flow.
-                await self._apply_variant(test, winner, content, promotion)
+                await self._apply_variant(
+                    test,
+                    winner,
+                    content,
+                    promotion,
+                )
+
+                if test.media_status == "waiting_image_reupload":
+                    raise ABTestReconciliationRequired(
+                        "Победившее изображение не подтверждено Wildberries. "
+                        "Финальная установка победителя не завершена.",
+                        incident_id=(
+                            test.incident_id
+                            or self._incident_id()
+                        ),
+                    )
+
             except Exception as exc:
                 winner_media_error = exc
+
                 try:
-                    await self._restore_original(test, content, allow_pending=True)
+                    await self._restore_original(
+                        test,
+                        content,
+                        allow_pending=True,
+                    )
                 except Exception as restore_after_winner_error:
                     winner_media_error = RuntimeError(
-                        f"{self._safe_error(exc)}; восстановление после установки победителя: "
+                        f"{self._safe_error(exc)}; "
+                        "восстановление после установки победителя: "
                         f"{self._safe_error(restore_after_winner_error)}"
                     )
         if winner_media_error:
@@ -3218,7 +3260,10 @@ class ABTestService:
         raw_targets = pending.get("targets") or {}
 
         if not isinstance(raw_targets, dict) or not raw_targets:
-            return False
+            raise ABTestReconciliationRequired(
+                "Повреждён журнал ожидающей операции со сменой изображения.",
+                incident_id=test.incident_id or self._incident_id(),
+            )
 
         targets = {
             int(raw_slot): dict(target)
@@ -3227,7 +3272,24 @@ class ABTestService:
         }
 
         if not targets:
-            return False
+            raise ABTestReconciliationRequired(
+                "Журнал смены изображения не содержит ни одного слота для восстановления.",
+                incident_id=test.incident_id or self._incident_id(),
+            )
+        pending_slots = {
+            int(slot)
+            for slot in (pending.get("slots") or [])
+        }
+
+        target_slots = set(targets)
+
+        if not pending_slots or pending_slots != target_slots:
+            raise ABTestReconciliationRequired(
+                "Журнал смены изображения повреждён: "
+                f"slots={sorted(pending_slots)}, "
+                f"targets={sorted(target_slots)}.",
+                incident_id=test.incident_id or self._incident_id(),
+            )
 
         payloads: dict[int, tuple[bytes, str, str]] = {}
 
@@ -3235,12 +3297,18 @@ class ABTestService:
             shadow_path = target.get("shadow_path")
 
             if not shadow_path:
-                return False
+                raise ABTestReconciliationRequired(
+                    f"Не найден shadow-файл для слота {slot}.",
+                    incident_id=test.incident_id or self._incident_id(),
+                )
 
             path = self._state_file(str(shadow_path))
 
             if not path.is_file():
-                return False
+                raise ABTestReconciliationRequired(
+                    f"Shadow-файл для слота {slot} отсутствует: {shadow_path}",
+                    incident_id=test.incident_id or self._incident_id(),
+                )
 
             payloads[slot] = (
                 path.read_bytes(),
@@ -3609,6 +3677,51 @@ class ABTestService:
             if not test:
                 continue
             phase = (operation.response_snapshot or {}).get("phase")
+
+            state = self._media_state(test)
+            pending = state.get("pending") or {}
+
+            if (
+                test.status == ABTestStatus.RUNNING
+                and isinstance(pending, dict)
+                and pending.get("kind")
+                in {
+                    "swap",
+                    "replace",
+                    "replace_with_parking",
+                }
+            ):
+                logger.info(
+                    "A/B pending media recovery deferred to scheduler "
+                    "test_id=%s nm_id=%s kind=%s",
+                    test.id,
+                    test.nm_id,
+                    pending.get("kind"),
+                )
+                continue
+            state = self._media_state(test)
+
+            pending = state.get("pending")
+
+            if (
+                test.status == ABTestStatus.RUNNING
+                and test.media_status == "waiting_image_reupload"
+                and phase == "image_reupload_waiting"
+            ):
+                logger.info(
+                    "A/B image reupload waiting state survived restart "
+                    "test_id=%s nm_id=%s retry_at=%s",
+                    test.id,
+                    test.nm_id,
+                    (
+                        (pending or {})
+                        .get("verification") or {}
+                    ).get("next_retry_at"),
+                )
+
+                # This is an intentional persisted retry state,
+                # not an interrupted unknown external operation.
+                continue
             operation_status = operation.status.value if isinstance(operation.status, ABTestOperationStatus) else str(operation.status)
             safely_prepared = (
                 operation_status == ABTestOperationStatus.PREPARED.value
@@ -3694,6 +3807,102 @@ class ABTestService:
             if handled:
                 await self.db.commit()
                 return
+
+        state = self._media_state(test)
+        pending = state.get("pending") or {}
+
+        pending_kind = pending.get("kind")
+
+        if (
+            pending_kind
+            in {
+                "swap",
+                "replace",
+                "replace_with_parking",
+            }
+            and state.get("status")
+            not in {
+                "waiting_image_reupload",
+                "variant_applied",
+            }
+        ):
+            logger.warning(
+                "A/B pending media operation detected; "
+                "starting recovery "
+                "test_id=%s nm_id=%s kind=%s slots=%s",
+                test.id,
+                test.nm_id,
+                pending_kind,
+                pending.get("slots"),
+            )
+
+            recovered = await self._recover_pending_variant_media(
+                test,
+                content,
+                promotion,
+            )
+
+            state = self._media_state(test)
+
+            # First verification failed during recovery.
+            # Campaign stays paused for the 1-hour retry.
+            if state.get("status") == "waiting_image_reupload":
+                test.status = ABTestStatus.RUNNING
+                test.campaign_state = "paused"
+                test.operation_state = (
+                    ABTestOperationStatus.IN_PROGRESS.value
+                )
+
+                await self.db.commit()
+                return
+
+            if recovered:
+                campaign_status = await promotion.get_campaign_status(
+                    test.wb_campaign_id,
+                    refresh=True,
+                )
+
+                # Campaign can be resumed only from resumable states.
+                if campaign_status in self.RESUMABLE_CAMPAIGN_STATUSES:
+                    test.campaign_state = "starting"
+                    await self.db.flush()
+
+                    await promotion.start_campaign(
+                        test.wb_campaign_id,
+                    )
+
+                    campaign_status = (
+                        await self._confirm_campaign_active(
+                            promotion,
+                            test.wb_campaign_id,
+                        )
+                    )
+
+                if campaign_status == 9:
+                    test.status = ABTestStatus.RUNNING
+                    test.campaign_state = "running"
+                    test.operation_state = (
+                        ABTestOperationStatus.SUCCEEDED.value
+                    )
+                    test.media_status = "variant_applied"
+
+                    await self.db.commit()
+                    return
+
+                # Campaign ended / disappeared while recovering.
+                test.operation_state = (
+                    ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                )
+                test.incident_id = (
+                    test.incident_id or self._incident_id()
+                )
+
+                raise ABTestReconciliationRequired(
+                    "Изображения восстановлены, "
+                    "но существующая кампания WB "
+                    "не может быть безопасно продолжена.",
+                    incident_id=test.incident_id,
+                )
         if not test.wb_campaign_id:
             raise RuntimeError("У теста отсутствует ID рекламной кампании WB")
         started_at = test.started_at.date() if test.started_at else None
