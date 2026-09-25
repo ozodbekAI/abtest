@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import io
 import json
+import re
 import imagehash
 from PIL import Image
 import logging
@@ -989,13 +990,26 @@ class ABTestService:
                 "file_name": filename,
             }
 
-        source_slots = {
-            slot
-            for variant in variants
-            if variant.source_type == "card" and variant.source_url
-            for slot, url in enumerate(original_media, start=1)
-            if self._canonical_media_url(url) == self._canonical_media_url(variant.source_url or "")
+        source_slots: set[int] = set()
+
+        slot_state = {
+            "backups": backups,
         }
+
+        for variant in variants:
+            if variant.source_type != "card":
+                continue
+
+            if not variant.source_url:
+                continue
+
+            source_slot = self._source_slot(
+                slot_state,
+                variant,
+            )
+
+            if source_slot is not None:
+                source_slots.add(int(source_slot))
         # A custom upload is first copied to a slot which is not used as a
         # source variant. If all slots are selected, direct slot 1 replacement
         # is still safe because all originals are backed up above.
@@ -1028,16 +1042,63 @@ class ABTestService:
         await self._set_media_state(test, state)
         return state
 
+    @staticmethod
+    def _extract_photo_number(url: str) -> int | None:
+        path = urlsplit(str(url or "").strip()).path
+
+        # WB URL examples:
+        # .../big/3.webp
+        # .../c516x688/3.webp
+        # .../c246x328/3.webp
+        match = re.search(
+            r"/(?:big|c\d+x\d+)/(\d+)\.[^/]+$",
+            path,
+        )
+
+        if not match:
+            return None
+
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+
     @classmethod
-    def _source_slot(cls, state: dict[str, Any], variant: ABTestVariant) -> int | None:
+    def _source_slot(
+        cls,
+        state: dict[str, Any],
+        variant: ABTestVariant,
+    ) -> int | None:
         source_url = variant.source_url
+
         if variant.source_type != "card" or not source_url:
             return None
+
+        # 1. Avval URL ichidan WB photo number'ni olamiz.
+        photo_number = cls._extract_photo_number(source_url)
+
+        if photo_number is not None:
+            backups = state.get("backups") or {}
+
+            if str(photo_number) in backups:
+                return photo_number
+
+        # 2. Fallback: eski URL comparison.
+        source_canonical = cls._canonical_media_url(source_url)
+
         for raw_slot, entry in (state.get("backups") or {}).items():
             if not isinstance(entry, dict):
                 continue
-            if cls._canonical_media_url(str(entry.get("url") or "")) == cls._canonical_media_url(source_url):
+
+            backup_url = str(entry.get("url") or "")
+
+            if (
+                cls._canonical_media_url(backup_url)
+                == source_canonical
+            ):
                 return int(raw_slot)
+
         return None
 
     def _slot_entry(self, state: dict[str, Any], slot: int, *, shadow: bool = True) -> dict[str, Any] | None:
@@ -1622,45 +1683,145 @@ class ABTestService:
         state: dict[str, Any],
         promotion: WBPromotionClient,
     ) -> None:
-        source_slot = self._source_slot(state, variant)
+        source_slot = self._source_slot(
+            state,
+            variant,
+        )
+
+        # ---------------------------------------------------------
+        # Card source bo‘lsa, source slot TOPILISHI SHART.
+        # Topilmasa parking fallback qilinmasin.
+        # ---------------------------------------------------------
+        if variant.source_type == "card" and source_slot is None:
+            test.incident_id = (
+                test.incident_id or self._incident_id()
+            )
+
+            raise ABTestReconciliationRequired(
+                (
+                    "Не удалось определить исходный слот "
+                    f"изображения WB: {variant.source_url}"
+                ),
+                incident_id=test.incident_id,
+            )
+
         if source_slot:
-            # Card sources are backed up locally at test start. This prevents a
-            # later swap or a delayed WB CDN response from changing the source
-            # bytes that are about to be copied.
-            data, mime, filename = self._read_state_slot(state, source_slot)
+            data, mime, filename = self._read_state_slot(
+                state,
+                source_slot,
+            )
         else:
-            data, mime, filename = await self._variant_bytes(test, variant, content)
-        filename, mime, data = self._prepare_image(filename, mime, data, verify_integrity=False)
-        self._validate_image(filename, mime, data)
+            data, mime, filename = await self._variant_bytes(
+                test,
+                variant,
+                content,
+            )
+
+        filename, mime, data = self._prepare_image(
+            filename,
+            mime,
+            data,
+            verify_integrity=False,
+        )
+
+        self._validate_image(
+            filename,
+            mime,
+            data,
+        )
 
         changed_slots: set[int] = {1}
 
-        current_main, current_main_mime, current_main_name = self._read_state_slot(
-            state,
-            1,
+        current_main, current_main_mime, current_main_name = (
+            self._read_state_slot(
+                state,
+                1,
+            )
         )
 
+        # ---------------------------------------------------------
+        # OLD vs NEW safety check.
+        # ---------------------------------------------------------
+        if variant.source_type != "control":
+            similar, distance = self._images_similar(
+                current_main,
+                data,
+                threshold=self.IMAGE_PHASH_THRESHOLD,
+            )
+
+            logger.info(
+                "A/B OLD NEW IMAGE CHECK "
+                "test_id=%s nm_id=%s variant=%s "
+                "distance=%s threshold=%s similar=%s",
+                test.id,
+                test.nm_id,
+                variant.position,
+                distance,
+                self.IMAGE_PHASH_THRESHOLD,
+                similar,
+            )
+
+            if similar:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        "Новый вариант изображения слишком похож "
+                        "на текущее изображение"
+                    ),
+                )
+
         targets: dict[int, tuple[bytes, str, str]] = {
-            1: (data, mime, filename)
+            1: (
+                data,
+                mime,
+                filename,
+            )
         }
+
         kind = "replace"
 
-        if variant.source_type == "card" and source_slot and source_slot != 1:
-            # True two-way swap: put the currently active main image into the
-            # source slot first, then put the selected original into slot 1.
-            # This is the crucial part missing from the previous implementation.
-            targets[source_slot] = (current_main, current_main_mime, current_main_name)
+        # ---------------------------------------------------------
+        # REAL TWO-WAY SWAP
+        # ---------------------------------------------------------
+        if (
+            variant.source_type == "card"
+            and source_slot
+            and source_slot != 1
+        ):
+            # slot 1 <- source_slot image
+            # source_slot <- old slot 1 image
+            targets[source_slot] = (
+                current_main,
+                current_main_mime,
+                current_main_name,
+            )
+
             changed_slots.add(source_slot)
+
             kind = "swap"
-        elif variant.source_type == "upload" or not source_slot:
+
+        # ---------------------------------------------------------
+        # CUSTOM UPLOAD
+        # ---------------------------------------------------------
+        elif variant.source_type == "upload":
             parking_slot = state.get("parking_slot")
-            if parking_slot and int(parking_slot) != 1:
+
+            if (
+                parking_slot
+                and int(parking_slot) != 1
+            ):
                 parking_slot = int(parking_slot)
-                # Parking the current main keeps it recoverable while a custom
-                # upload is active and mirrors the legacy engine behaviour.
-                targets[parking_slot] = (current_main, current_main_mime, current_main_name)
+
+                targets[parking_slot] = (
+                    current_main,
+                    current_main_mime,
+                    current_main_name,
+                )
+
                 changed_slots.add(parking_slot)
+
                 kind = "replace_with_parking"
+       
 
         target_meta: dict[int, dict[str, Any]] = {}
         shadow_entries: dict[str, dict[str, Any]] = {}
@@ -1734,23 +1895,64 @@ class ABTestService:
             # Muhim:
             # WB API upload 200 qaytargani bilan CDN darhol yangi
             # image'ni bermasligi mumkin.
-            await asyncio.sleep(10)
+            await asyncio.sleep(30)
 
             verified = await self._verify_uploaded_image(
                 test=test,
                 slot=slot,
                 expected_data=slot_data,
                 content=content,
-                attempts=5,
-                delay_seconds=10,
-                threshold=10,
+                attempts=self.IMAGE_VERIFY_ATTEMPTS,
+                delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
+                threshold=self.IMAGE_PHASH_THRESHOLD,
             )
 
             if not verified:
-                raise ABTestReconciliationRequired(
-                    f"WB не подтвердил обновление изображения "
-                    f"слота {slot} после загрузки"
+                verification = (
+                    state.get("pending", {}).get("verification") or {}
                 )
+
+                verification["status"] = "waiting_reupload"
+                verification["reupload_count"] = 1
+                verification["next_retry_at"] = (
+                    self._now().timestamp()
+                    + self.IMAGE_REUPLOAD_DELAY_SECONDS
+                )
+
+                state["pending"]["verification"] = verification
+                state["status"] = "waiting_image_reupload"
+
+                test.media_status = "waiting_image_reupload"
+                test.campaign_state = "paused"
+                test.operation_state = (
+                    ABTestOperationStatus.IN_PROGRESS.value
+                )
+
+                await self._set_media_state(test, state)
+                await self.db.commit()
+
+                logger.warning(
+                    "WB IMAGE VERIFY FAILED; reupload scheduled "
+                    "test_id=%s nm_id=%s slot=%s retry_in=%ss",
+                    test.id,
+                    test.nm_id,
+                    slot,
+                    self.IMAGE_REUPLOAD_DELAY_SECONDS,
+                )
+
+                return
+
+                logger.warning(
+                    "WB IMAGE VERIFY FAILED; reupload scheduled "
+                    "test_id=%s nm_id=%s slot=%s retry_in=%ss",
+                    test.id,
+                    test.nm_id,
+                    slot,
+                    self.IMAGE_REUPLOAD_DELAY_SECONDS,
+                )
+
+                return
+            
         state["shadows"] = {**(state.get("shadows") or {}), **shadow_entries}
         state["pending"] = None
         state["current_variant_position"] = variant.position
