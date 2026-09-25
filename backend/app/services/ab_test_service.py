@@ -1496,16 +1496,73 @@ class ABTestService:
             )
 
         targets = pending.get("targets") or {}
+        raw_slots = pending.get("slots") or []
 
-        for raw_slot in pending.get("slots") or []:
-            slot = int(raw_slot)
-            target = targets.get(str(slot)) or {}
+        if not isinstance(targets, dict) or not targets:
+            raise ABTestReconciliationRequired(
+                "Повреждён журнал повторной загрузки изображения: targets отсутствуют.",
+                incident_id=test.incident_id or self._incident_id(),
+            )
+
+        if not isinstance(raw_slots, list) or not raw_slots:
+            raise ABTestReconciliationRequired(
+                "Повреждён журнал повторной загрузки изображения: slots отсутствуют.",
+                incident_id=test.incident_id or self._incident_id(),
+            )
+
+        try:
+            pending_slots = {int(slot) for slot in raw_slots}
+        except (TypeError, ValueError) as exc:
+            raise ABTestReconciliationRequired(
+                "Повреждён журнал повторной загрузки изображения: некорректные slots.",
+                incident_id=test.incident_id or self._incident_id(),
+            ) from exc
+
+        target_slots = set()
+
+        for raw_slot, target in targets.items():
+            try:
+                target_slot = int(raw_slot)
+            except (TypeError, ValueError) as exc:
+                raise ABTestReconciliationRequired(
+                    "Повреждён журнал повторной загрузки изображения: "
+                    f"некорректный target slot={raw_slot}.",
+                    incident_id=test.incident_id or self._incident_id(),
+                ) from exc
+
+            if not isinstance(target, dict):
+                raise ABTestReconciliationRequired(
+                    f"Повреждён журнал изображения: target для слота {target_slot} "
+                    "имеет некорректный формат.",
+                    incident_id=test.incident_id or self._incident_id(),
+                )
+
+            target_slots.add(target_slot)
+
+        if pending_slots != target_slots:
+            raise ABTestReconciliationRequired(
+                "Повреждён журнал повторной загрузки изображения: "
+                f"slots={sorted(pending_slots)}, "
+                f"targets={sorted(target_slots)}.",
+                incident_id=test.incident_id or self._incident_id(),
+            )
+
+        for slot in sorted(pending_slots):
+            target = targets.get(str(slot))
+            if target is None:
+                target = targets.get(slot)
+
+            if not isinstance(target, dict):
+                raise ABTestReconciliationRequired(
+                    f"Не найден target для повторной загрузки слота {slot}.",
+                    incident_id=test.incident_id or self._incident_id(),
+                )
 
             shadow_path = target.get("shadow_path")
 
             if not shadow_path:
                 raise ABTestReconciliationRequired(
-                    f"Не найден файл для повторной загрузки слота {slot}",
+                    f"Не найден файл для повторной загрузки слота {slot}.",
                     incident_id=test.incident_id or self._incident_id(),
                 )
 
@@ -1513,7 +1570,7 @@ class ABTestService:
 
             if not path.is_file():
                 raise ABTestReconciliationRequired(
-                    f"Файл для повторной загрузки слота {slot} отсутствует",
+                    f"Файл для повторной загрузки слота {slot} отсутствует.",
                     incident_id=test.incident_id or self._incident_id(),
                 )
 
@@ -1561,6 +1618,13 @@ class ABTestService:
                     f"Инцидент {test.incident_id}."
                 )[:2000]
 
+                state["pending"] = pending
+                state["status"] = "verification_failed"
+                verification["status"] = "failed"
+                verification["next_retry_at"] = None
+                pending["verification"] = verification
+
+                await self._set_media_state(test, state)
                 await self.db.commit()
 
                 raise ABTestReconciliationRequired(
@@ -1568,51 +1632,7 @@ class ABTestService:
                     incident_id=test.incident_id,
                 )
 
-        # Second verification succeeded.
-        state["shadows"] = {
-            **(state.get("shadows") or {}),
-            **{
-                str(slot): {
-                    "path": str(targets[str(slot)]["shadow_path"]),
-                    "mime": targets[str(slot)].get("mime") or "image/jpeg",
-                    "file_name": targets[str(slot)].get("file_name") or f"slot_{slot}.jpg",
-                }
-                for slot in pending.get("slots") or []
-            },
-        }
-
-        variant_position = int(
-            pending.get("variant_position")
-            or test.current_variant_order
-            or 1
-        )
-
-        state["pending"] = None
-        state["current_variant_position"] = variant_position
-        state["status"] = "variant_applied"
-        state["expected_slot_count"] = int(
-            state.get("slot_count")
-            or len(state.get("backups") or {})
-        )
-        state["expected_snapshot"] = {
-            str(slot): {
-                "url": (
-                    state.get("backups") or {}
-                ).get(str(slot), {}).get("url") or ""
-            }
-            for slot in range(
-                1,
-                int(state["expected_slot_count"]) + 1,
-            )
-        }
-
-        test.current_variant_order = variant_position
-        test.media_status = "variant_applied"
-
-
-        await self._set_media_state(test, state)
-
-        # Resume the SAME campaign after media verification.
+        # Image verification succeeded. Resume the SAME campaign.
         campaign_status = await promotion.get_campaign_status(
             test.wb_campaign_id,
             refresh=True,
@@ -1623,7 +1643,7 @@ class ABTestService:
             await self.db.flush()
 
             await promotion.start_campaign(
-                test.wb_campaign_id
+                test.wb_campaign_id,
             )
 
             campaign_status = await self._confirm_campaign_active(
@@ -1638,10 +1658,22 @@ class ABTestService:
             test.incident_id = test.incident_id or self._incident_id()
 
             raise ABTestReconciliationRequired(
-                "Изображение подтверждено, но повторный запуск "
-                "существующей кампании WB не подтверждён.",
+                "Изображение успешно загружено и проверено, "
+                "но существующая кампания WB не была повторно запущена.",
                 incident_id=test.incident_id,
             )
+
+
+        variant_position = pending.get("variant_position")
+
+        verification["status"] = "verified"
+        verification["next_retry_at"] = None
+        verification["reupload_count"] = reupload_count
+
+        pending["verification"] = verification
+
+        state["pending"] = None
+        state["status"] = "variant_applied"
 
         test.status = ABTestStatus.RUNNING
         test.campaign_state = "running"
@@ -1651,6 +1683,9 @@ class ABTestService:
         test.media_status = "variant_applied"
         test.last_error = None
         test.incident_id = None
+
+        await self._set_media_state(test, state)
+        await self.db.commit()
 
         logger.info(
             "WB image reupload verified and campaign resumed "
