@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -78,8 +78,16 @@ class ABTestRepository:
             .where(
                 ABTest.status != ABTestStatus.RUNNING,
                 ABTest.wb_campaign_id.isnot(None),
-                ABTest.campaign_state.in_(
-                    ["running", "starting", "unknown", "pause_requested", "stop_requested", "created", "paused"]
+                or_(
+                    ABTest.campaign_state.in_(
+                        ["running", "starting", "unknown", "pause_requested", "stop_requested", "created", "paused"]
+                    ),
+                    # A stopped campaign with an unrestored card is still owed a restore.
+                    and_(
+                        ABTest.status == ABTestStatus.FAILED,
+                        ABTest.lifecycle_lock.is_(True),
+                        ABTest.media_status.notin_(["restored", "winner_applied", "original", "external_conflict"]),
+                    ),
                 ),
             )
             .order_by(ABTest.id)

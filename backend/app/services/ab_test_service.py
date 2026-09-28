@@ -74,6 +74,7 @@ class ABTestService:
     IMAGE_MIN_DISTINGUISHABLE_DISTANCE = 4
 
     IMAGE_VERIFY_MAX_REUPLOADS = 1
+    RESTORE_RECOVERY_MAX_ATTEMPTS = 5
     # A/B experiments are intentionally limited to 2–5 tested images.  The
     # product-card API supports up to 30 media slots, but those are not 30
     # statistically comparable experiment variants. Keeping this limit in the
@@ -154,6 +155,29 @@ class ABTestService:
         """Calculate a deterministic perceptual hash for an image."""
         from app.utils.imagehash_compat import phash
         return phash(data)
+
+    @staticmethod
+    def _hash_to_bits(value: Any) -> str:
+        return "".join("1" if bit else "0" for bit in value.bits)
+
+    @staticmethod
+    def _bits_to_hash(bits: str) -> ImageHash:
+        from app.utils.imagehash_compat import ImageHash as _CompatHash
+        if not bits or set(bits) - {"0", "1"}:
+            raise ValueError("invalid perceptual hash journal value")
+        return _CompatHash(tuple(int(char) for char in bits))
+
+    def _slot_phash_bits(self, state: dict[str, Any], slot: int) -> str | None:
+        """Fingerprint of what the slot holds NOW (per local shadow/backup).
+
+        Must be taken BEFORE any shadow file is overwritten or deleted, and is
+        journaled so retry/recovery can still tell the old photo from the new.
+        """
+        try:
+            data = self._read_state_slot(state, slot)[0]
+            return self._hash_to_bits(self._perceptual_hash(data))
+        except Exception:
+            return None
 
     @staticmethod
     def _image_hash_distance(hash1: ImageHash, hash2: ImageHash) -> int:
@@ -1742,6 +1766,8 @@ class ABTestService:
         delay_seconds: int = 10,
         threshold: int = 10,
         previous_data: bytes | None = None,
+        previous_phash: str | None = None,
+        require_previous: bool = False,
     ) -> bool:
         """
         Verify that WB CDN serves the exact image uploaded to the slot.
@@ -1761,13 +1787,33 @@ class ABTestService:
 
         expected_hash = self._perceptual_hash(expected_data)
         previous_hash = None
-        if previous_data:
-            try:
-                candidate_previous = self._perceptual_hash(previous_data)
-                if (expected_hash - candidate_previous) >= self.IMAGE_MIN_DISTINGUISHABLE_DISTANCE:
-                    previous_hash = candidate_previous
-            except Exception:
-                previous_hash = None
+        try:
+            if previous_phash:
+                previous_hash = self._bits_to_hash(previous_phash)
+            elif previous_data:
+                previous_hash = self._perceptual_hash(previous_data)
+            if previous_hash is not None:
+                gap = expected_hash - previous_hash
+                if gap == 0:
+                    # The slot already shows this picture: nothing to tell apart.
+                    previous_hash = None
+                elif gap < self.IMAGE_MIN_DISTINGUISHABLE_DISTANCE:
+                    logger.error(
+                        "WB VERIFY INDISTINGUISHABLE test_id=%s slot=%s gap=%s: "
+                        "old and new photo cannot be told apart, not confirming",
+                        test.id, slot, gap,
+                    )
+                    return False
+        except Exception:
+            previous_hash = None
+            if require_previous:
+                logger.error("WB VERIFY previous photo fingerprint unreadable test_id=%s slot=%s", test.id, slot)
+                return False
+        if previous_hash is None and require_previous and not previous_phash and not previous_data:
+            logger.error(
+                "WB VERIFY previous photo unknown test_id=%s slot=%s: not confirming", test.id, slot,
+            )
+            return False
 
         logger.info(
             "WB VERIFY EXPECTED "
@@ -2156,6 +2202,8 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
+                previous_phash=target.get("previous_phash"),
+                require_previous=bool(target.get("previous_required")),
             )
 
             if not verified:
@@ -2442,9 +2490,14 @@ class ABTestService:
 
         target_meta: dict[int, dict[str, Any]] = {}
         shadow_entries: dict[str, dict[str, Any]] = {}
+        # FIX A1: fingerprint the photo each slot shows NOW, before
+        # _write_shadow overwrites/deletes the old local copy.
+        previous_fingerprints = {slot: self._slot_phash_bits(state, slot) for slot in targets}
         for slot, (slot_data, slot_mime, slot_name) in targets.items():
             shadow_entries[str(slot)] = self._write_shadow(test, slot, slot_data, slot_mime, slot_name)
             target_meta[slot] = {
+                "previous_phash": previous_fingerprints.get(slot),
+                "previous_required": True,
                 # Keep the local shadow path in the journal so a worker crash
                 # can replay the same slot writes without probing WB media.
                 "shadow_path": shadow_entries[str(slot)]["path"],
@@ -2516,11 +2569,6 @@ class ABTestService:
             # image'ni bermasligi mumkin.
             await asyncio.sleep(30)
 
-            try:
-                previous_slot_data = self._read_state_slot(state, slot)[0]
-            except Exception:
-                previous_slot_data = None
-
             verified = await self._verify_uploaded_image(
                 test=test,
                 slot=slot,
@@ -2529,7 +2577,8 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
-                previous_data=previous_slot_data,
+                previous_phash=previous_fingerprints.get(slot),
+                require_previous=True,
             )
 
             if not verified:
@@ -2620,6 +2669,9 @@ class ABTestService:
             await self._set_media_state(test, state)
 
             targets: dict[int, dict[str, Any]] = {}
+            # FIX A2: what the slot shows before restore (test photo), so a
+            # similar-looking leftover is not mistaken for the original.
+            restore_previous = {slot: self._slot_phash_bits(state, slot) for slot in touched}
             for slot in sorted(touched):
                 entry = (state.get("backups") or {}).get(str(slot))
                 if not entry:
@@ -2650,6 +2702,7 @@ class ABTestService:
                     str(slot): {
                         "original_url": target.get("original_url"),
                         "shadow_path": (state.get("backups") or {}).get(str(slot), {}).get("path"),
+                        "previous_phash": restore_previous.get(slot),
                     }
                     for slot, target in targets.items()
                 },
@@ -2681,6 +2734,7 @@ class ABTestService:
                     attempts=self.IMAGE_VERIFY_ATTEMPTS,
                     delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                     threshold=self.IMAGE_PHASH_THRESHOLD,
+                    previous_phash=restore_previous.get(slot),
                 )
 
                 if not verified:
@@ -4477,6 +4531,8 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
+                previous_phash=(targets.get(slot) or {}).get("previous_phash"),
+                require_previous=bool((targets.get(slot) or {}).get("previous_required")),
             )
 
             # -----------------------------------------------------
@@ -5537,11 +5593,25 @@ class ABTestService:
                 # on the card. "paused" used to be skipped here, so nobody ever
                 # restored the card. Confirm the stop and restore the originals;
                 # on failure keep a concrete unresolved incident.
+                # FIX A3: stopping the campaign and restoring the card are two
+                # separate obligations. A confirmed stop must not drop the test
+                # out of recovery while the photos are still not restored.
+                # Only a real external conflict or the attempt cap ends it.
+                _media_state_now = self._media_state(locked_stuck) if hasattr(locked_stuck, "media_state") else {}
+                _restore_attempts = int(_media_state_now.get("restore_recovery_attempts") or 0)
                 if (
-                    locked_stuck.campaign_state == "paused"
-                    and locked_stuck.status == ABTestStatus.FAILED
+                    locked_stuck.status == ABTestStatus.FAILED
                     and locked_stuck.lifecycle_lock
+                    and locked_stuck.campaign_state in {
+                        "paused", "running", "starting", "unknown",
+                        "pause_requested", "stop_requested", "stopped",
+                    }
+                    and getattr(locked_stuck, "media_status", None) not in {"restored", "winner_applied", "original", "external_conflict"}
+                    and _restore_attempts < self.RESTORE_RECOVERY_MAX_ATTEMPTS
                 ):
+                    _media_state_now["restore_recovery_attempts"] = _restore_attempts + 1
+                    if hasattr(locked_stuck, "media_state"):
+                        await self._set_media_state(locked_stuck, _media_state_now)
                     try:
                         connection = await self._connection_or_404(locked_stuck.user_id, locked_stuck.connection_id, require_ab_access=False)
                         content, promotion = await self._clients(connection)
