@@ -1,7 +1,0 @@
-WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=4 attempt=1 distance=132
-WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=4 attempt=2 distance=132
-WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=4 attempt=3 distance=132
-WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=4 attempt=4 distance=132
-WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=4 attempt=5 distance=132
-WB VERIFY FAILED test_id=1 nm_id=92000 slot=4 attempts=5
-WB IMAGE VERIFY FAILED; reupload scheduled test_id=1 nm_id=92000 slot=4 retry_in=3600s

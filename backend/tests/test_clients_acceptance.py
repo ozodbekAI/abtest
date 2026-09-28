@@ -17,6 +17,7 @@ from PIL import Image
 
 from app.services.wb_content_client import WBApiError, WBContentClient, _retry_after_seconds
 from app.services.wb_promotion_client import WBPromotionClient
+from app.core.config import settings
 from app.services.wb_rate_limiter import WBRateLimiter
 from app.services.wb_token_service import WBTokenService
 
@@ -292,6 +293,45 @@ async def test_fullstats_refresh_bypasses_cache_and_keeps_cached_observation_tim
     assert cached["_observed_at"] == first["_observed_at"]
     assert fresh["views"] == 101
 
+
+
+@pytest.mark.asyncio
+async def test_real_wb_mutations_are_blocked_without_explicit_opt_in(monkeypatch):
+    monkeypatch.setattr(settings, "wb_allow_external_requests", False)
+    client = WBPromotionClient("synthetic")
+    client.base_url = "https://advert-api.wildberries.ru"
+    with pytest.raises(WBApiError, match="Внешние изменения Wildberries отключены"):
+        await client.start_campaign(123)
+
+
+@pytest.mark.asyncio
+async def test_loopback_provider_mutation_remains_available_for_synthetic_audit(monkeypatch):
+    monkeypatch.setattr(settings, "wb_allow_external_requests", False)
+    client = WBPromotionClient("synthetic")
+    client.base_url = "http://127.0.0.1:18901/p"
+    client._request = AsyncMock(return_value={"ok": True})
+    assert await client.start_campaign(123) == {"ok": True}
+
+
+@pytest.mark.asyncio
+async def test_variant_attribution_rejects_missing_metric(stats_client):
+    row = observation(views=400, clicks=24, sum=120.0) | {"variantPosition": 1}
+    del row["orders"]
+    stats_client._request = AsyncMock(return_value=[row])
+    result = await stats_client.fullstats(1)
+    assert result["_variant_attribution_complete"] is False
+    assert "_variant_totals" not in result
+
+
+@pytest.mark.asyncio
+async def test_variant_attribution_rejects_clicks_above_views(stats_client):
+    stats_client._request = AsyncMock(return_value=[
+        observation(views=100, clicks=101, orders=0, sum=20.0) | {"variantPosition": 1},
+        observation(views=100, clicks=10, orders=0, sum=20.0) | {"variantPosition": 2},
+    ])
+    result = await stats_client.fullstats(1)
+    assert result["_variant_attribution_complete"] is False
+    assert "_variant_totals" not in result
 
 def test_retry_after_accepts_seconds_and_http_date():
     assert _retry_after_seconds(httpx.Response(429, headers={"Retry-After": "90"})) == 90

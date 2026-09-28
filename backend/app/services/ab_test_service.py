@@ -3813,10 +3813,13 @@ class ABTestService:
                         "required_budget": int(required_budget),
                         "funding_source": selected_funding_source,
                     }
+                    # Keep the external deposit pending until WB's read model
+                    # confirms the new balance. A timeout/429 does not prove
+                    # that money was not accepted.
                     await self.repository.add_budget_entry(
                         test_id=test.id,
                         operation_id=operation.id,
-                        kind="deposit_confirmed",
+                        kind="deposit_pending",
                         amount_rub=shortfall,
                         provider_balance_rub=current_budget,
                         source=selected_funding_source,
@@ -3851,6 +3854,16 @@ class ABTestService:
                                 "campaign_id": int(campaign_id),
                             },
                         )
+                    await self.repository.add_budget_entry(
+                        test_id=test.id,
+                        operation_id=operation.id,
+                        kind="deposit_confirmed",
+                        amount_rub=shortfall,
+                        provider_balance_rub=current_budget,
+                        source=selected_funding_source,
+                        metadata_json={"required_budget": int(required_budget)},
+                    )
+                    await self.db.commit()
 
                 if test.skip_current_photo:
                     first = self._variant_by_position(test, 1)

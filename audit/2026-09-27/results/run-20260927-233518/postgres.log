@@ -1,6 +1,0 @@
-2026-09-27 23:35:19.731 +05 [1265521] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
-2026-09-27 23:35:19.731 +05 [1265521] LOG:  could not bind IPv4 address "127.0.0.1": Address already in use
-2026-09-27 23:35:19.731 +05 [1265521] HINT:  Is another postmaster already running on port 55432? If not, wait a few seconds and retry.
-2026-09-27 23:35:19.731 +05 [1265521] WARNING:  could not create listen socket for "127.0.0.1"
-2026-09-27 23:35:19.732 +05 [1265521] FATAL:  could not create any TCP/IP sockets
-2026-09-27 23:35:19.732 +05 [1265521] LOG:  database system is shut down

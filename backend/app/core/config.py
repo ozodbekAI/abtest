@@ -35,6 +35,9 @@ class Settings(BaseSettings):
     wb_analytics_api_url: str = "https://seller-analytics-api.wildberries.ru"
     wb_statistics_api_url: str = "https://statistics-api.wildberries.ru"
     wb_request_timeout: float = 15.0
+    # Real WB mutations are disabled unless explicitly enabled. Loopback
+    # providers remain available for deterministic synthetic audit runs.
+    wb_allow_external_requests: bool = False
     media_root: str = "./media"
     media_signing_secret: str = ""
     media_url_expire_sec: int = 3600
@@ -67,10 +70,14 @@ class Settings(BaseSettings):
         if self.app_env == "production" and not self.media_signing_secret.strip():
             raise ValueError("MEDIA_SIGNING_SECRET must be configured in production")
         if self.app_env == "production":
+            if not self.wb_allow_external_requests:
+                raise ValueError("WB_ALLOW_EXTERNAL_REQUESTS must be true in production")
             for name in ("wb_content_api_url", "wb_common_api_url", "wb_advert_api_url", "wb_analytics_api_url", "wb_statistics_api_url"):
                 value = str(getattr(self, name)).lower()
                 if any(host in value for host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")):
                     raise ValueError(f"{name} must point to a non-loopback provider in production")
+        elif self.app_env in {"test", "testing", "ci"} and self.wb_allow_external_requests:
+            raise ValueError("WB_ALLOW_EXTERNAL_REQUESTS must remain false in test/CI environments")
         return self
 
 

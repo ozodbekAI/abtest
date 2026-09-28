@@ -10,6 +10,7 @@ import math
 import time
 from typing import Any
 from zoneinfo import ZoneInfo
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -21,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 
 class WBPromotionClient:
+    _MUTATING_PATHS = frozenset({
+        "/adv/v2/seacat/save-ad",
+        "/api/advert/v1/bids",
+        "/adv/v1/budget/deposit",
+        "/adv/v0/start",
+        "/adv/v0/pause",
+        "/adv/v0/stop",
+        "/adv/v0/delete",
+    })
     _stats_locks: dict[str, asyncio.Lock] = {}
     _last_stats_at: dict[str, float] = {}
     _stats_cache: dict[tuple[str, tuple[int, ...], str, str], tuple[float, dict[str, Any]]] = {}
@@ -70,10 +80,25 @@ class WBPromotionClient:
             return str(payload)[:500]
         return None
 
+    def _assert_external_mutation_allowed(self, path: str) -> None:
+        """Fail closed before any real WB mutation unless explicitly enabled."""
+        if path not in self._MUTATING_PATHS or settings.wb_allow_external_requests:
+            return
+        host = (urlsplit(self.base_url).hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1", "0.0.0.0"}:
+            return
+        raise WBApiError(
+            "Внешние изменения Wildberries отключены настройкой WB_ALLOW_EXTERNAL_REQUESTS. "
+            "Для реального кабинета включите её только в явно разрешённом окружении.",
+            status_code=503,
+            payload={"code": "external_wb_mutations_disabled", "path": path},
+        )
+
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
-        if path in {"/adv/v2/seacat/save-ad", "/api/advert/v1/bids", "/adv/v1/budget/deposit", "/adv/v0/start", "/adv/v0/pause", "/adv/v0/stop", "/adv/v0/delete"}:
+        if path in self._MUTATING_PATHS:
             from app.services.wb_rate_limiter import WBRateLimiter
             await WBRateLimiter.assert_lock_owned()
+            self._assert_external_mutation_allowed(path)
         timeout = max(settings.wb_request_timeout, 30.0)
         started = time.perf_counter()
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -859,11 +884,30 @@ class WBPromotionClient:
             position = cls._variant_position(node)
             if position is None:
                 return False
+
+            # Attribution is trustworthy only when every metric row carries
+            # the explicit variant identity and all metrics required by the
+            # winner contract. Missing fields must not silently become zero.
+            metric_keys = {
+                "views": ("views", "shows", "impressions"),
+                "clicks": ("clicks",),
+                "orders": ("orders",),
+                "sum": ("sum", "spend", "cost"),
+            }
+            values: dict[str, float] = {}
+            for metric, aliases in metric_keys.items():
+                if not any(alias in node for alias in aliases):
+                    return False
+                value = cls._metric_total(node, metric, aliases=aliases[1:])
+                if not math.isfinite(value) or value < 0:
+                    return False
+                values[metric] = value
+            if values["clicks"] > values["views"]:
+                return False
+
             entry = found.setdefault(str(position), {"views": 0.0, "clicks": 0.0, "orders": 0.0, "sum": 0.0})
-            entry["views"] += cls._metric_total(node, "views", aliases=("shows", "impressions"))
-            entry["clicks"] += cls._metric_total(node, "clicks")
-            entry["orders"] += cls._metric_total(node, "orders")
-            entry["sum"] += cls._metric_total(node, "sum", aliases=("spend", "cost"))
+            for metric, value in values.items():
+                entry[metric] += value
             return True
 
         if not walk(rows) or not saw_metric or not found:
