@@ -1,0 +1,71 @@
+INFO:     Started server process [1277478]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18901 (Press CTRL+C to quit)
+INFO:     127.0.0.1:50660 - "GET /_ctl/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50660 - "POST /_ctl/reset HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50660 - "POST /_ctl/setup HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50670 - "GET /c/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50674 - "GET /p/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50670 - "GET /common/api/v1/seller-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50690 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50698 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50712 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50660 - "GET /_ctl/photo/UPL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50722 - "GET /c/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50736 - "GET /p/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50722 - "GET /common/api/v1/seller-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50748 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50750 - "GET /p/adv/v1/balance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50764 - "GET /c/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50778 - "GET /p/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50764 - "GET /common/api/v1/seller-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50780 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50788 - "GET /p/adv/v1/balance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50790 - "GET /cdn/92000/1.webp?v=1790534389889&wb_optimizer_verify=f619ff1b910ae75b HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50796 - "GET /cdn/92000/2.webp?v=1790534389889&wb_optimizer_verify=b753fbb6ae782060 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50808 - "GET /cdn/92000/3.webp?v=1790534389889&wb_optimizer_verify=6d40d271f40eab34 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50816 - "GET /cdn/92000/4.webp?v=1790534389889&wb_optimizer_verify=26a7dae0229b2534 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50826 - "GET /cdn/92000/1.webp?v=1790534389889&wb_optimizer_verify=7e468363c6cc90ac HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50828 - "GET /cdn/92000/2.webp?v=1790534389889&wb_optimizer_verify=411a10bc0c614eae HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50844 - "GET /cdn/92000/3.webp?v=1790534389889&wb_optimizer_verify=ebfda67c3d0cdc89 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50858 - "GET /cdn/92000/4.webp?v=1790534389889&wb_optimizer_verify=29997dd5c4573d07 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50864 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50870 - "POST /p/adv/v2/seacat/save-ad HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50886 - "GET /p/api/advert/v2/adverts?ids=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50900 - "GET /p/api/advert/v2/adverts?ids=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50914 - "POST /p/api/advert/v1/bids/min HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50922 - "PATCH /p/api/advert/v1/bids HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50936 - "GET /p/adv/v1/budget?id=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50946 - "GET /p/adv/v1/balance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50960 - "POST /p/adv/v1/budget/deposit?id=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50974 - "GET /p/adv/v1/budget?id=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50984 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50986 - "GET /cdn/92000/1.webp?v=1790534389889&wb_optimizer_verify=1acf53169e4e7136 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51000 - "GET /cdn/92000/2.webp?v=1790534389889&wb_optimizer_verify=bdc4f88905ebcde9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51008 - "GET /cdn/92000/3.webp?v=1790534389889&wb_optimizer_verify=c7573bb6c7162a09 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51018 - "GET /cdn/92000/4.webp?v=1790534389889&wb_optimizer_verify=64c6dca5fd4d98a0 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:51030 - "POST /c/content/v3/media/file HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41290 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41294 - "GET /cdn/92000/3.webp?v=1790534394375&wb_optimizer_verify=6d590781866d31c9 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:41304 - "POST /c/content/v3/media/file HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50598 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50614 - "GET /cdn/92000/1.webp?v=1790534424621&wb_optimizer_verify=5def6ece9ee1bf52 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50628 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50636 - "GET /cdn/92000/1.webp?v=1790534424621&wb_optimizer_verify=a56cba2d77c5bc33 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50648 - "GET /cdn/92000/2.webp?v=1790534424621&wb_optimizer_verify=f81833d6ae3efefa HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50664 - "GET /cdn/92000/3.webp?v=1790534424621&wb_optimizer_verify=f652d541932215cf HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50670 - "GET /cdn/92000/4.webp?v=1790534424621&wb_optimizer_verify=b973927f82939cb2 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50686 - "GET /p/adv/v0/start?id=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50688 - "GET /p/adv/v1/promotion/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50702 - "POST /_ctl/advance HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50714 - "GET /p/adv/v3/fullstats?ids=1138901&beginDate=2026-09-27&endDate=2026-09-27 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50720 - "POST /p/api/advert/v1/bids/min HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50732 - "GET /p/adv/v1/promotion/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50746 - "GET /p/adv/v0/pause?id=1138901 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50748 - "GET /p/adv/v1/promotion/count HTTP/1.1" 200 OK
+INFO:     127.0.0.1:46712 - "GET /p/adv/v3/fullstats?ids=1138901&beginDate=2026-09-27&endDate=2026-09-27 HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1277478]

@@ -1,0 +1,439 @@
+{
+  "api": {
+    "id": 1,
+    "connection_id": 1,
+    "store_name": "Synthetic S1",
+    "nm_id": 92000,
+    "title": "E2E 92000",
+    "status": "running",
+    "wb_campaign_id": 1509701,
+    "bid_type": "unified",
+    "skip_current_photo": true,
+    "keep_winner_as_main": false,
+    "delete_test_media": false,
+    "views_per_variant": 300,
+    "cpm_rub": 300,
+    "budget_rub": 1500,
+    "placement": "combined",
+    "current_variant_order": 1,
+    "winner_variant_order": null,
+    "winner_decision": null,
+    "operation_state": "in_progress",
+    "campaign_state": "paused",
+    "media_status": "waiting_image_reupload",
+    "stats_quality": "aggregate_unverified",
+    "incident_id": null,
+    "unallocated_views": 300,
+    "unallocated_clicks": 18,
+    "unallocated_spend_rub": 90.0,
+    "funding_source": "account",
+    "stage_views": 300,
+    "stage_clicks": 18,
+    "stage_spend_rub": 90.0,
+    "total_views": 300,
+    "total_clicks": 18,
+    "total_spend_rub": 90.0,
+    "total_ctr": 6.0,
+    "total_orders": 0,
+    "total_cpo": null,
+    "last_error": null,
+    "started_at": "2026-09-27T19:42:43.657160Z",
+    "finished_at": null,
+    "last_synced_at": "2026-09-27T19:43:24.790380Z",
+    "created_at": "2026-09-27T19:41:40.401000Z",
+    "draft_fingerprint": "da99628628f3bfe8cf90e36fc934d730f5583e66206bc0bbb6eb0623bcc89e9b",
+    "start_confirmation_fingerprint": "da99628628f3bfe8cf90e36fc934d730f5583e66206bc0bbb6eb0623bcc89e9b",
+    "stage_exposure_views": 300,
+    "variants": [
+      {
+        "id": 1,
+        "position": 1,
+        "source_type": "card",
+        "file_name": "Фото карточки 3",
+        "image_url": "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790538098208",
+        "source_url": "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790538098208",
+        "wb_url": null,
+        "views": 0,
+        "clicks": 0,
+        "ctr": null,
+        "spend_rub": 0.0,
+        "is_winner": false,
+        "orders": 0,
+        "cpo": null
+      },
+      {
+        "id": 2,
+        "position": 2,
+        "source_type": "upload",
+        "file_name": "v.jpg",
+        "image_url": "/media/ab_tests/1/2_c181c99f7f42353313c8.jpg?expires=1790542076&signature=5273f198004e7c82500492f55746d812e465773bba7862090a5097d9f256c034",
+        "source_url": null,
+        "wb_url": null,
+        "views": 0,
+        "clicks": 0,
+        "ctr": null,
+        "spend_rub": 0.0,
+        "is_winner": false,
+        "orders": 0,
+        "cpo": null
+      }
+    ]
+  },
+  "mock": {
+    "cards": {
+      "92000": {
+        "seller": "S1",
+        "slots": [
+          "P3",
+          "P2",
+          "ORIG",
+          "P4"
+        ],
+        "video": false,
+        "sha256": [
+          "107adc9650b4617bb80c0c15eae129daa024d7a3d993e2658d33551b4ce3bf67",
+          "f0e1203ab77e7e0f5e8a92f298d8dbd4ed5503153a87f30103e6d097781195bd",
+          "26cd589828c8bf43f0098c09e51832e37323eac64c1d8643bb01f6065fc7a203",
+          "d584067e08737fa7e701199dccce59fd1ff7af762254a98f4994731a58db5d46"
+        ]
+      }
+    },
+    "campaigns": {
+      "1509701": {
+        "seller": "S1",
+        "nms": [
+          92000
+        ],
+        "status": 11,
+        "bid_kop": 30000,
+        "budget": 1500.0,
+        "spent": 90.0,
+        "views": 300,
+        "clicks": 18,
+        "bid_type": "unified",
+        "payment_type": "cpm",
+        "name": "E2E 92000",
+        "by_label": {
+          "P3": {
+            "views": 300,
+            "clicks": 18,
+            "spent": 90.0
+          }
+        }
+      }
+    },
+    "sellers": {
+      "S1": {
+        "balance": 998500,
+        "net": 0,
+        "bonus": 0
+      }
+    },
+    "flags": {
+      "media_mode": "ignore",
+      "start_fail": false,
+      "pause_ignore": false,
+      "stop_ignore": false,
+      "stats_mode": "normal",
+      "traffic_per_call": 300,
+      "min_bid_rub": 200
+    }
+  },
+  "events": [
+    {
+      "t": 1790538102.175,
+      "kind": "campaign_created",
+      "id": 1509701,
+      "nms": [
+        92000
+      ],
+      "seller": "S1"
+    },
+    {
+      "t": 1790538102.254,
+      "kind": "bid_set",
+      "id": 1509701,
+      "bid_kop": 30000
+    },
+    {
+      "t": 1790538102.31,
+      "kind": "deposit",
+      "id": 1509701,
+      "amount": 1500,
+      "source": "balance",
+      "seller": "S1"
+    },
+    {
+      "t": 1790538102.815,
+      "kind": "media_upload",
+      "nm": 92000,
+      "slot": 3,
+      "label": "ORIG",
+      "applied": true
+    },
+    {
+      "t": 1790538133.053,
+      "kind": "media_upload",
+      "nm": 92000,
+      "slot": 1,
+      "label": "P3",
+      "applied": true
+    },
+    {
+      "t": 1790538163.64,
+      "kind": "start",
+      "id": 1509701
+    },
+    {
+      "t": 1790538163.676,
+      "kind": "ctl_flags",
+      "media_mode": "ignore"
+    },
+    {
+      "t": 1790538163.678,
+      "kind": "traffic",
+      "id": 1509701,
+      "main_photo": "P3",
+      "views": 300,
+      "clicks": 18,
+      "cost": 90.0
+    },
+    {
+      "t": 1790538164.349,
+      "kind": "fullstats",
+      "ids": "1509701",
+      "mode": "normal",
+      "rows": 1
+    },
+    {
+      "t": 1790538164.418,
+      "kind": "pause",
+      "id": 1509701,
+      "status": 11
+    },
+    {
+      "t": 1790538184.567,
+      "kind": "fullstats",
+      "ids": "1509701",
+      "mode": "normal",
+      "rows": 1
+    },
+    {
+      "t": 1790538204.785,
+      "kind": "fullstats",
+      "ids": "1509701",
+      "mode": "normal",
+      "rows": 1
+    },
+    {
+      "t": 1790538205.291,
+      "kind": "media_upload",
+      "nm": 92000,
+      "slot": 4,
+      "label": "P3",
+      "applied": false
+    }
+  ],
+  "db_tests": [
+    {
+      "id": 1,
+      "user_id": 1,
+      "connection_id": 1,
+      "nm_id": 92000,
+      "title": "E2E 92000",
+      "status": "RUNNING",
+      "wb_campaign_id": 1509701,
+      "skip_current_photo": true,
+      "keep_winner_as_main": false,
+      "delete_test_media": false,
+      "views_per_variant": 300,
+      "cpm_rub": 300,
+      "budget_rub": 1500,
+      "placement": "combined",
+      "current_variant_order": 1,
+      "winner_variant_order": null,
+      "last_total_views": 300,
+      "last_total_clicks": 18,
+      "last_total_spend_rub": 90.0,
+      "original_media": [
+        "http://127.0.0.1:18901/cdn/92000/1.webp?v=1790538098208",
+        "http://127.0.0.1:18901/cdn/92000/2.webp?v=1790538098208",
+        "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790538098208",
+        "http://127.0.0.1:18901/cdn/92000/4.webp?v=1790538098208"
+      ],
+      "original_main_backup_path": "ab_tests/1/original/slot_1.webp",
+      "last_error": null,
+      "started_at": "2026-09-28T00:42:43.65716+05:00",
+      "finished_at": null,
+      "last_synced_at": "2026-09-28T00:43:24.79038+05:00",
+      "created_at": "2026-09-28T00:41:40.401+05:00",
+      "updated_at": "2026-09-28T00:47:56.393248+05:00",
+      "winner_decision": null,
+      "media_state": {
+        "version": 1,
+        "status": "waiting_image_reupload",
+        "test_slot": 1,
+        "parking_slot": 4,
+        "slot_count": 4,
+        "original_urls": [
+          "http://127.0.0.1:18901/cdn/92000/1.webp?v=1790538098208",
+          "http://127.0.0.1:18901/cdn/92000/2.webp?v=1790538098208",
+          "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790538098208",
+          "http://127.0.0.1:18901/cdn/92000/4.webp?v=1790538098208"
+        ],
+        "backups": {
+          "1": {
+            "path": "ab_tests/1/original/slot_1.webp",
+            "url": "http://127.0.0.1:18901/cdn/92000/1.webp?v=1790538098208",
+            "mime": "image/webp",
+            "file_name": "1.webp",
+            "sha256": "26cd589828c8bf43f0098c09e51832e37323eac64c1d8643bb01f6065fc7a203"
+          },
+          "2": {
+            "path": "ab_tests/1/original/slot_2.webp",
+            "url": "http://127.0.0.1:18901/cdn/92000/2.webp?v=1790538098208",
+            "mime": "image/webp",
+            "file_name": "2.webp",
+            "sha256": "77049a12a22f8f11324dcb3f66925c3031e71c35d1ea15286ef0e6760611ff8c"
+          },
+          "3": {
+            "path": "ab_tests/1/original/slot_3.webp",
+            "url": "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790538098208",
+            "mime": "image/webp",
+            "file_name": "3.webp",
+            "sha256": "107adc9650b4617bb80c0c15eae129daa024d7a3d993e2658d33551b4ce3bf67"
+          },
+          "4": {
+            "path": "ab_tests/1/original/slot_4.webp",
+            "url": "http://127.0.0.1:18901/cdn/92000/4.webp?v=1790538098208",
+            "mime": "image/webp",
+            "file_name": "4.webp",
+            "sha256": "d0d44d5189ce544386f59977bf64f4353fde5c1176efb48c16b6261daeb6f6a9"
+          }
+        },
+        "shadows": {
+          "1": {
+            "path": "ab_tests/1/current/slot_1.webp",
+            "mime": "image/webp",
+            "file_name": "3.webp"
+          },
+          "3": {
+            "path": "ab_tests/1/current/slot_3.webp",
+            "mime": "image/webp",
+            "file_name": "1.webp"
+          }
+        },
+        "touched": [
+          1,
+          3,
+          4
+        ],
+        "pending": {
+          "kind": "replace_with_parking",
+          "variant_position": 2,
+          "slots": [
+            1,
+            4
+          ],
+          "targets": {
+            "1": {
+              "shadow_path": "ab_tests/1/current/slot_1.jpg",
+              "mime": "image/jpeg",
+              "file_name": "2_c181c99f7f42353313c8.jpg",
+              "original_url": "http://127.0.0.1:18901/cdn/92000/1.webp?v=1790538098208"
+            },
+            "4": {
+              "shadow_path": "ab_tests/1/current/slot_4.webp",
+              "mime": "image/webp",
+              "file_name": "3.webp",
+              "original_url": "http://127.0.0.1:18901/cdn/92000/4.webp?v=1790538098208"
+            }
+          },
+          "verification": {
+            "status": "waiting_reupload",
+            "attempt": 0,
+            "reupload_count": 1,
+            "next_retry_at": 1790542076.39164
+          }
+        },
+        "expected_slot_count": 4,
+        "expected_snapshot": {
+          "1": {
+            "url": "http://127.0.0.1:18901/cdn/92000/1.webp?v=1790538133052",
+            "sha256": "b019020b6965290a310117bcacec55dd75ef26a1a5725cd18a4e66c1a12af126"
+          },
+          "2": {
+            "url": "http://127.0.0.1:18901/cdn/92000/2.webp?v=1790538133052",
+            "sha256": "77049a12a22f8f11324dcb3f66925c3031e71c35d1ea15286ef0e6760611ff8c"
+          },
+          "3": {
+            "url": "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790538133052",
+            "sha256": "ad807c261f0f9e4346da80f89bdd9baef1247d789592384e32f7fc7a49b46dd7"
+          },
+          "4": {
+            "url": "http://127.0.0.1:18901/cdn/92000/4.webp?v=1790538133052",
+            "sha256": "d0d44d5189ce544386f59977bf64f4353fde5c1176efb48c16b6261daeb6f6a9"
+          }
+        },
+        "expected_videos": [],
+        "current_variant_position": 1
+      },
+      "operation_state": "in_progress",
+      "campaign_state": "paused",
+      "media_status": "waiting_image_reupload",
+      "stats_quality": "aggregate_unverified",
+      "incident_id": null,
+      "unallocated_views": 300,
+      "unallocated_clicks": 18,
+      "unallocated_spend_rub": 90.0,
+      "bid_type": "unified",
+      "last_total_orders": 0,
+      "stage_started_at": "2026-09-28T00:42:43.65716+05:00",
+      "store_fingerprint": "5d2a3e397b2b8ba15643f912db8e5e125475908769f888b85ff53dac2d3a9f62",
+      "lifecycle_lock": true,
+      "stage_views": 300,
+      "stage_clicks": 18,
+      "stage_spend_rub": 90.0,
+      "funding_source": "account",
+      "settled_total_views": 300,
+      "settled_total_clicks": 18,
+      "settled_total_orders": 0,
+      "settled_total_spend_rub": 90.0
+    }
+  ],
+  "db_operations": [
+    {
+      "id": 1,
+      "test_id": 1,
+      "user_id": 1,
+      "connection_id": 1,
+      "nm_id": 92000,
+      "operation_key": "start-90628824-07fc-48ad-bf85-bab812e00623",
+      "kind": "start",
+      "fingerprint": "21f346037edae3a2e416e07dd72f2b58006fc4f7ec60f82479cbb6e48c4dd4c8",
+      "status": "SUCCEEDED",
+      "external_id": 1509701,
+      "request_snapshot": {
+        "test_id": 1,
+        "connection_id": 1,
+        "nm_id": 92000,
+        "views_per_variant": 300,
+        "cpm_rub": 300,
+        "bid_type": "unified",
+        "placement": "combined",
+        "deposit_rub": null,
+        "auto_deposit": true,
+        "funding_source": "account"
+      },
+      "response_snapshot": {
+        "phase": "campaign_running_confirmed",
+        "campaign_id": 1509701,
+        "funding_source": "account"
+      },
+      "attempts": 1,
+      "last_error": null,
+      "created_at": "2026-09-28T00:41:40.85862+05:00",
+      "updated_at": "2026-09-28T00:42:43.663564+05:00"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+2026-09-27 23:35:37.096 +05 [1266163] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-09-27 23:35:37.097 +05 [1266163] LOG:  listening on IPv4 address "127.0.0.1", port 55439
+2026-09-27 23:35:37.102 +05 [1266163] LOG:  listening on Unix socket "/tmp/abtest-audit-gb1clqs8/.s.PGSQL.55439"
+2026-09-27 23:35:37.111 +05 [1266166] LOG:  database system was shut down at 2026-09-27 23:35:36 +05
+2026-09-27 23:35:37.118 +05 [1266163] LOG:  database system is ready to accept connections
+2026-09-27 23:35:38.494 +05 [1266221] ERROR:  value too long for type character varying(32)
+2026-09-27 23:35:38.494 +05 [1266221] STATEMENT:  UPDATE alembic_version SET version_num='0013_stage_timeout_and_winner_safety' WHERE alembic_version.version_num = '0012_admin_audit_logs'
+2026-09-27 23:35:39.379 +05 [1266250] ERROR:  value too long for type character varying(32)
+2026-09-27 23:35:39.379 +05 [1266250] STATEMENT:  UPDATE alembic_version SET version_num='0013_stage_timeout_and_winner_safety' WHERE alembic_version.version_num = '0012_admin_audit_logs'
+2026-09-27 23:35:40.316 +05 [1266280] ERROR:  value too long for type character varying(32)
+2026-09-27 23:35:40.316 +05 [1266280] STATEMENT:  UPDATE alembic_version SET version_num='0013_stage_timeout_and_winner_safety' WHERE alembic_version.version_num = '0012_admin_audit_logs'
+2026-09-27 23:35:40.607 +05 [1266163] LOG:  received fast shutdown request
+2026-09-27 23:35:40.610 +05 [1266163] LOG:  aborting any active transactions
+2026-09-27 23:35:40.613 +05 [1266163] LOG:  background worker "logical replication launcher" (PID 1266169) exited with exit code 1
+2026-09-27 23:35:40.614 +05 [1266164] LOG:  shutting down
+2026-09-27 23:35:40.617 +05 [1266164] LOG:  checkpoint starting: shutdown immediate
+2026-09-27 23:35:41.809 +05 [1266164] LOG:  checkpoint complete: wrote 2877 buffers (17.6%); 0 WAL file(s) added, 0 removed, 1 recycled; write=0.037 s, sync=1.132 s, total=1.196 s; sync files=1136, longest=0.004 s, average=0.001 s; distance=13980 kB, estimate=13980 kB; lsn=0/229A728, redo lsn=0/229A728
+2026-09-27 23:35:41.821 +05 [1266163] LOG:  database system is shut down

@@ -18,6 +18,11 @@ class WBConnectionCreateRequest(WBTokenRequest):
     pass
 
 
+class WBConnectionRotateTokenRequest(WBTokenRequest):
+    """Replace a revoked/expired token for an existing WB connection."""
+    pass
+
+
 class WBPingResult(BaseModel):
     category: str
     status: str
@@ -32,6 +37,8 @@ class WBConnectionResponse(BaseModel):
     status: str
     token_last4: str = ""
     ready_for_ab_tests: bool
+    write_access: bool = False
+    seller_id: str | None = None
     access: dict[str, bool]
     pings: dict[str, Any]
     last_validated_at: datetime | None = None

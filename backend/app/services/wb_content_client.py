@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import ipaddress
+import asyncio
+import io
 import logging
 import secrets
 import socket
 import time
 from typing import Any
 from urllib.parse import urljoin, urlsplit
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 
 import httpx
 
@@ -36,6 +40,33 @@ def _json_or_text(response: httpx.Response) -> Any:
         return response.json()
     except ValueError:
         return response.text
+
+
+def _retry_after_seconds(response: httpx.Response) -> float | None:
+    value = response.headers.get("X-Ratelimit-Retry") or response.headers.get("Retry-After")
+    if not value:
+        return None
+    try:
+        delay = float(value)
+        return delay if 0 <= delay < float("inf") else None
+    except ValueError:
+        try:
+            deadline = parsedate_to_datetime(value)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            return max((deadline - datetime.now(timezone.utc)).total_seconds(), 0.0)
+        except (TypeError, ValueError, OverflowError):
+            return None
+
+
+def _redact_token(payload: Any, token: str) -> Any:
+    if isinstance(payload, str):
+        return payload.replace(token, "<redacted>") if token else payload
+    if isinstance(payload, dict):
+        return {key: _redact_token(value, token) for key, value in payload.items()}
+    if isinstance(payload, list):
+        return [_redact_token(value, token) for value in payload]
+    return payload
 
 
 class WBContentClient:
@@ -74,6 +105,9 @@ class WBContentClient:
         return None
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        if path.startswith("/content/v3/media/"):
+            from app.services.wb_rate_limiter import WBRateLimiter
+            await WBRateLimiter.assert_lock_owned()
         timeout = max(settings.wb_request_timeout, 30.0)
         started = time.perf_counter()
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -85,16 +119,11 @@ class WBContentClient:
             response.status_code,
             int((time.perf_counter() - started) * 1000),
         )
-        payload = _json_or_text(response)
+        payload = _redact_token(_json_or_text(response), self.token)
         if not 200 <= response.status_code < 300:
             message = self._error_message(payload) or response.reason_phrase
             logger.warning("WB Content error path=%s status=%s message=%s", path, response.status_code, message)
-            retry_after = None
-            if response.status_code == 429:
-                try:
-                    retry_after = float(response.headers.get("Retry-After", "0"))
-                except ValueError:
-                    retry_after = None
+            retry_after = _retry_after_seconds(response) if response.status_code == 429 else None
             raise WBApiError(
                 f"WB Content: {message or response.reason_phrase}",
                 status_code=response.status_code,
@@ -110,7 +139,6 @@ class WBContentClient:
     @staticmethod
     def photo_urls(card: dict[str, Any]) -> list[str]:
         result: list[str] = []
-        seen: set[str] = set()
         for item in card.get("photos") or []:
             value = item if isinstance(item, str) else (
                 item.get("big")
@@ -122,8 +150,7 @@ class WBContentClient:
                 if isinstance(item, dict) else None
             )
             value = str(value or "").strip()
-            if value and value not in seen:
-                seen.add(value)
+            if value:
                 result.append(value)
         return result
 
@@ -131,6 +158,7 @@ class WBContentClient:
     def normalize_card(card: dict[str, Any]) -> dict[str, Any]:
         photos = WBContentClient.photo_urls(card)
         return {
+            **card,
             "nm_id": int(card.get("nmID") or card.get("nmId") or card.get("nm_id") or 0),
             "vendor_code": card.get("vendorCode") or card.get("vendor_code"),
             "title": card.get("title"),
@@ -154,7 +182,9 @@ class WBContentClient:
             # WB's nmID search expects a numeric string. Removing leading
             # zeroes also avoids searching for a different text token.
             search_value = str(int(search_value))
-        page_limit = 1 if numeric_search else min(max(int(limit), 1), 100)
+        # textSearch can also match numeric vendor codes and barcodes. Fetch a
+        # complete page before selecting the exact nmID.
+        page_limit = min(max(int(limit), 1), 100)
         settings_body: dict[str, Any] = {
             "sort": {"ascending": False},
             "filter": {"withPhoto": -1, "allowedCategoriesOnly": True},
@@ -172,6 +202,10 @@ class WBContentClient:
             next_cursor = response_data.get("cursor")
         if not isinstance(next_cursor, dict):
             next_cursor = None
+        if next_cursor is not None:
+            total = next_cursor.get("total")
+            if (isinstance(total, int) and total < page_limit) or len(cards) < page_limit:
+                next_cursor = None
         normalized: list[dict[str, Any]] = []
         seen_nm_ids: set[int] = set()
         for card in cards:
@@ -214,21 +248,42 @@ class WBContentClient:
                 for key in ("updatedAt", "nmID", "nmId", "limit")
                 if key in next_cursor
             }
-            if not {"updatedAt", "limit"}.issubset(next_cursor) or not any(
+            if "updatedAt" not in next_cursor or not any(
                 key in next_cursor for key in ("nmID", "nmId")
             ):
-                break
+                raise WBApiError("WB не вернул курсор для следующей страницы каталога")
+            next_cursor["limit"] = page_limit
             marker = tuple(sorted((key, str(value)) for key, value in next_cursor.items()))
             if marker in seen_cursors:
-                break
+                raise WBApiError("WB повторил курсор каталога; полнота списка не подтверждена")
             seen_cursors.add(marker)
             cursor = next_cursor
-            if len(page) < page_limit:
-                break
+        else:
+            raise WBApiError("Каталог превышает безопасный предел страниц; уточните поиск")
         return result
 
+    @staticmethod
+    def media_snapshot(card: dict[str, Any] | None) -> dict[str, Any]:
+        card = card or {}
+        photos = WBContentClient.photo_urls(card)
+        videos = []
+        raw_videos = card.get("videos") or card.get("video") or []
+        if isinstance(raw_videos, (str, dict)):
+            raw_videos = [raw_videos]
+        for item in raw_videos:
+            if isinstance(item, str):
+                value = item
+            elif isinstance(item, dict):
+                value = item.get("url") or item.get("src") or item.get("preview") or item.get("video")
+            else:
+                value = None
+            value = str(value or "").strip()
+            if value and value not in videos:
+                videos.append(value)
+        return {"photos": photos, "videos": videos, "photo_count": len(photos), "video_count": len(videos)}
+
     async def get_card(self, nm_id: int) -> dict[str, Any] | None:
-        cards = await self.list_cards(search=str(nm_id), limit=100)
+        cards = await self.list_all_cards(search=str(nm_id), limit=100)
         return next((card for card in cards if card["nm_id"] == int(nm_id)), None)
 
     async def download_image(self, url: str, *, cache_bust: bool = False) -> tuple[bytes, str]:
@@ -236,14 +291,25 @@ class WBContentClient:
         if cache_bust:
             separator = "&" if "?" in request_url else "?"
             request_url = f"{request_url}{separator}wb_optimizer_verify={secrets.token_hex(8)}"
-        async with httpx.AsyncClient(timeout=90.0, follow_redirects=False) as client:
+        # Pin the validated IP. Host and TLS SNI retain the original hostname;
+        # neither a second DNS answer nor environment proxies can reroute it.
+        async with httpx.AsyncClient(timeout=90.0, follow_redirects=False, trust_env=False) as client:
             response = None
             for _ in range(4):
-                await self._assert_public_image_url(request_url)
-                response = await client.get(
-                    request_url,
-                    headers={"Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
-                )
+                addresses = await self._assert_public_image_url(request_url)
+                parsed = urlsplit(request_url)
+                pinned_url = httpx.URL(request_url).copy_with(host=addresses[0])
+                async with client.stream(
+                    "GET", pinned_url,
+                    headers={"Host": parsed.netloc, "Cache-Control": "no-cache, no-store", "Pragma": "no-cache"},
+                    extensions={"sni_hostname": parsed.hostname},
+                ) as response:
+                    body = bytearray()
+                    if response.status_code not in {301, 302, 303, 307, 308}:
+                        async for chunk in response.aiter_bytes():
+                            body.extend(chunk)
+                            if len(body) > 32 * 1024 * 1024:
+                                raise WBApiError("Изображение больше допустимых 32 МБ")
                 if response.status_code not in {301, 302, 303, 307, 308}:
                     break
                 location = response.headers.get("location")
@@ -257,15 +323,22 @@ class WBContentClient:
         logger.info("WB image download status=%s cache_bust=%s", response.status_code, cache_bust)
         if not 200 <= response.status_code < 300:
             raise WBApiError(f"Не удалось загрузить изображение: HTTP {response.status_code}", status_code=response.status_code)
-        content_type = (response.headers.get("content-type") or "image/jpeg").split(";", 1)[0].strip().lower()
+        content_type = (response.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
         if not content_type.startswith("image/"):
             raise WBApiError("Ссылка не ведёт на изображение")
-        if len(response.content) > 32 * 1024 * 1024:
-            raise WBApiError("Изображение больше допустимых 32 МБ")
-        return response.content, content_type
+        from PIL import Image, UnidentifiedImageError
+        content = bytes(body)
+        try:
+            with Image.open(io.BytesIO(content)) as image:
+                image.verify()
+            with Image.open(io.BytesIO(content)) as image:
+                image.load()
+        except (UnidentifiedImageError, OSError, ValueError, EOFError, Image.DecompressionBombError) as exc:
+            raise WBApiError("Изображение повреждено или не читается полностью") from exc
+        return content, content_type
 
     @staticmethod
-    async def _assert_public_image_url(url: str) -> None:
+    async def _assert_public_image_url(url: str) -> list[str]:
         """Reject localhost/private-network image targets, including DNS hits."""
         parsed = urlsplit(str(url).strip())
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -280,12 +353,10 @@ class WBContentClient:
             addresses = [ipaddress.ip_address(host)]
         except ValueError:
             try:
-                # Resolve synchronously here because the server must not rely
-                # on a possibly unavailable default thread executor just to
-                # validate a CDN URL. This is a short DNS lookup and the
-                # request is rejected immediately on resolution failure.
-                resolved = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-            except OSError as exc:
+                # A bounded worker lookup leaves the event loop available to
+                # emergency stops for unrelated sellers.
+                resolved = await asyncio.wait_for(asyncio.to_thread(socket.getaddrinfo, host, None, type=socket.SOCK_STREAM), timeout=5.0)
+            except (OSError, asyncio.TimeoutError) as exc:
                 raise WBApiError("Не удалось проверить адрес изображения") from exc
             addresses = []
             for item in resolved:
@@ -295,10 +366,13 @@ class WBContentClient:
                     continue
         if not addresses or any(not address.is_global for address in addresses):
             raise WBApiError("Загрузка изображений из внутренней сети запрещена")
+        return list(dict.fromkeys(str(address) for address in addresses))
 
     async def upload_media_file(
         self, *, nm_id: int, photo_number: int, content: bytes, filename: str, content_type: str
     ) -> Any:
+        from app.services.wb_rate_limiter import WBRateLimiter
+        await WBRateLimiter.assert_lock_owned()
         started = time.perf_counter()
         headers = {**self.headers, "X-Nm-Id": str(nm_id), "X-Photo-Number": str(photo_number)}
         async with httpx.AsyncClient(timeout=90.0) as client:
@@ -316,7 +390,7 @@ class WBContentClient:
             response.status_code,
             int((time.perf_counter() - started) * 1000),
         )
-        payload = _json_or_text(response)
+        payload = _redact_token(_json_or_text(response), self.token)
         if not 200 <= response.status_code < 300:
             message = payload.get("errorText") if isinstance(payload, dict) else str(payload)
             logger.warning(
@@ -326,7 +400,8 @@ class WBContentClient:
                 response.status_code,
                 message,
             )
-            raise WBApiError(f"WB Media: {message or response.reason_phrase}", status_code=response.status_code, payload=payload)
+            raise WBApiError(f"WB Media: {message or response.reason_phrase}", status_code=response.status_code, payload=payload,
+                             retry_after=_retry_after_seconds(response) if response.status_code == 429 else None)
         if isinstance(payload, dict) and payload.get("error"):
             logger.warning(
                 "WB Media response error nm_id=%s photo_number=%s error=%s",

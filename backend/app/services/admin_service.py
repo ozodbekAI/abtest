@@ -8,6 +8,7 @@ from app.core.security import hash_password
 from app.models.admin_audit import AdminAuditLog
 from app.models.user import User
 from app.repositories.admin_repository import AdminRepository
+from app.repositories.ab_test_repository import ABTestRepository
 from app.repositories.app_settings_repository import AppSettingsRepository
 from app.repositories.auth_repository import AuthRepository
 from app.repositories.wb_repository import WBRepository
@@ -286,6 +287,7 @@ class AdminService:
                     f"({', '.join(str(test.id) for test in unsafe_tests[:5])})."
                 ),
             )
+        await ABTestRepository(self.db).archive_audit_events_for_user(user.id)
         await self.repository.delete_user(user)
         await self._audit(
             actor,

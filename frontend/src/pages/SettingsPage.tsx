@@ -17,6 +17,8 @@ export function SettingsPage() {
   const [showToken, setShowToken] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [validating, setValidating] = useState(false);
+  const [replacementToken, setReplacementToken] = useState('');
+  const [rotatingToken, setRotatingToken] = useState(false);
 
   const connection = useMemo(
     () => connections.find((item) => item.id === activeConnectionId) || connections[0] || null,
@@ -83,6 +85,23 @@ export function SettingsPage() {
     }
   };
 
+  const rotateToken = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!connection || !replacementToken.trim()) return;
+    setRotatingToken(true);
+    try {
+      const updated = await api.rotateWBConnectionToken(connection.id, replacementToken.trim());
+      replaceConnection(updated);
+      setReplacementToken('');
+      toast.success('Токен WB заменён. Сохранённые A/B-тесты смогут продолжить сверку с новым токеном.');
+    } catch (error: any) {
+      const detail = error?.details?.detail;
+      toast.error(typeof detail === 'string' ? detail : error?.message || 'Не удалось заменить токен WB');
+    } finally {
+      setRotatingToken(false);
+    }
+  };
+
   const disconnect = async () => {
     if (!connection || !window.confirm(`Удалить магазин «${connection.store_name}»?`)) return;
     try {
@@ -103,7 +122,7 @@ export function SettingsPage() {
       <div className="page-heading"><div><div className="eyebrow eyebrow-dark"><KeyRound size={14} /> НАСТРОЙКИ МАГАЗИНОВ</div><h1>Настройки магазинов</h1><p>Подключайте магазины Wildberries и управляйте доступами в одном месте.</p></div><Link to="/dashboard" className="outline-button">Перейти к обзору <ArrowUpRight size={15} /></Link></div>
       <div className="settings-content settings-content-wide">
         <section className="settings-card stores-card"><div className="settings-card-heading"><div><span className="settings-kicker">ПОДКЛЮЧЕНИЯ</span><h2>Магазины Wildberries</h2><p>У каждого магазина свой токен, доступы и статистика.</p></div><div className="large-status-icon"><KeyRound size={22} /></div></div>{connections.length > 0 ? <div className="store-list">{connections.map((item) => <button type="button" className={`store-list-item ${item.id === connection?.id ? 'active' : ''}`} key={item.id} onClick={() => selectConnection(item.id)}><span className="store-list-icon"><StoreIcon /></span><span className="store-list-copy"><strong>{item.store_name}</strong><small>Токен заканчивается на ••••{item.token_last4}</small></span><span className={`status-dot ${item.ready_for_ab_tests ? 'ready' : 'warning'}`} /></button>)}</div> : <div className="stores-empty"><span className="store-empty-icon"><KeyRound size={20} /></span><div><strong>Магазины ещё не подключены</strong><p>Добавьте первый токен WB, чтобы открыть доступ к продвижению и A/B-тестам.</p></div></div>}<form onSubmit={addConnection} className="store-add-form"><div className="store-form-grid"><label>Название магазина<input value={storeName} onChange={(event) => setStoreName(event.target.value)} placeholder="Например, Основной магазин" required minLength={2} maxLength={120} /></label><label>Токен WB API<div className="token-input"><input type={showToken ? 'text' : 'password'} value={token} onChange={(event) => setToken(event.target.value)} placeholder="Вставьте токен API Wildberries" required minLength={20} autoComplete="off" /><button type="button" onClick={() => setShowToken((value) => !value)} aria-label={showToken ? 'Скрыть токен' : 'Показать токен'}>{showToken ? <EyeOff size={17} /> : <Eye size={17} />}</button></div></label></div><div className="token-help"><AlertCircle size={15} /><span>У токена должен быть доступ к категориям <strong>«Контент»</strong> и <strong>«Продвижение»</strong>. Перед сохранением токен шифруется.</span></div><button className="primary-button" disabled={connecting}>{connecting ? 'Проверка доступа WB…' : 'Добавить магазин и проверить'}<Plus size={17} /></button></form></section>
-        {connection && <section className="settings-card wb-settings-card"><div className="settings-card-heading"><div><span className="settings-kicker">АКТИВНЫЙ МАГАЗИН</span><h2>{connection.store_name}</h2><p>Доступы и состояние подключения выбранного магазина.</p></div><div className={`large-status-icon ${connection.ready_for_ab_tests ? 'ready' : ''}`}>{connection.ready_for_ab_tests ? <ShieldCheck size={22} /> : <KeyRound size={22} />}</div></div><div className="connected-banner"><div><span className={`status-pill ${connection.ready_for_ab_tests ? 'status-ready' : 'status-warning'}`}><span /> {connection.ready_for_ab_tests ? 'Готово к A/B-тестам' : 'Ограниченный доступ'}</span><strong>Токен заканчивается на ••••{connection.token_last4}</strong></div><button className="danger-button" onClick={() => void disconnect()}><Trash2 size={15} /> Удалить</button></div><AccessGrid connection={connection} /><div className="validate-row"><span><RefreshCw size={14} /> {connection.last_validated_at ? `Последняя проверка: ${new Date(connection.last_validated_at).toLocaleString('ru-RU')}` : 'Проверка ещё не выполнялась'}</span><button className="outline-button compact" onClick={() => void validate()} disabled={validating}>{validating ? 'Проверка…' : 'Проверить доступ'}<RefreshCw size={15} /></button></div></section>}
+        {connection && <section className="settings-card wb-settings-card"><div className="settings-card-heading"><div><span className="settings-kicker">АКТИВНЫЙ МАГАЗИН</span><h2>{connection.store_name}</h2><p>Доступы и состояние подключения выбранного магазина.</p></div><div className={`large-status-icon ${connection.ready_for_ab_tests ? 'ready' : ''}`}>{connection.ready_for_ab_tests ? <ShieldCheck size={22} /> : <KeyRound size={22} />}</div></div><div className="connected-banner"><div><span className={`status-pill ${connection.ready_for_ab_tests ? 'status-ready' : 'status-warning'}`}><span /> {connection.ready_for_ab_tests ? 'Готово к A/B-тестам' : 'Ограниченный доступ'}</span><strong>Токен заканчивается на ••••{connection.token_last4}</strong></div><button className="danger-button" onClick={() => void disconnect()}><Trash2 size={15} /> Удалить</button></div><AccessGrid connection={connection} /><div className="validate-row"><span><RefreshCw size={14} /> {connection.last_validated_at ? `Последняя проверка: ${new Date(connection.last_validated_at).toLocaleString('ru-RU')}` : 'Проверка ещё не выполнялась'}</span><button className="outline-button compact" onClick={() => void validate()} disabled={validating}>{validating ? 'Проверка…' : 'Проверить доступ'}<RefreshCw size={15} /></button></div><form onSubmit={rotateToken} className="store-add-form" style={{ marginTop: 16 }}><label>Заменить токен WB<div className="token-input"><input type="password" value={replacementToken} onChange={(event) => setReplacementToken(event.target.value)} placeholder="Новый токен API Wildberries" required minLength={20} autoComplete="off" /></div></label><div className="token-help"><AlertCircle size={15} /><span>Используется для восстановления сверки после отзыва старого токена. При активном небезопасном тесте новый токен сначала проверяется на доступ к карточке и кампании.</span></div><button className="outline-button" disabled={rotatingToken}>{rotatingToken ? 'Проверяем и заменяем…' : 'Заменить токен'}<KeyRound size={15} /></button></form></section>}
       </div>
     </div>
   </AppShell>;

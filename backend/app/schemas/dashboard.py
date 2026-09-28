@@ -28,7 +28,7 @@ class DashboardStatsResponse(BaseModel):
     clicks: int
     spend_rub: float
     orders: int
-    ctr: float
+    ctr: float | None = None
     cpo_rub: float | None = None
     completed_campaign_count: int
     failed_campaign_count: int

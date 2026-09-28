@@ -180,6 +180,7 @@ export const api = {
     if (cursor?.nmID || cursor?.nmId) params.set('cursor_nm_id', String(cursor.nmID || cursor.nmId));
     return request<ABTestCardsPage>(`/ab-tests/cards?${params.toString()}`, { signal });
   },
+  getABTestConfig: () => request<{ minimum_budget_rub: number; budget_step_rub: number; budget_guard_reserve_rub: number; minimum_views_per_variant: number; max_variants: number }>('/ab-tests/config'),
   getABTests: (connectionId?: number, status?: string) => {
     const params = new URLSearchParams();
     if (connectionId) params.set('connection_id', String(connectionId));
@@ -202,8 +203,9 @@ export const api = {
   setABTestVariantSource: (testId: number, position: number, source_url: string) =>
     request<ABTest>(`/ab-tests/${testId}/variants/${position}/source`, { method: 'POST', body: JSON.stringify({ source_url }) }),
   deleteABTestVariant: (testId: number, position: number) => request<ABTest>(`/ab-tests/${testId}/variants/${position}`, { method: 'DELETE' }),
-  startABTest: (testId: number, payload: { auto_deposit: boolean; deposit_rub?: number; funding_source?: 'auto' | 'account' | 'mutual' | 'bonus' }, idempotencyKey?: string) => request<ABTest>(`/ab-tests/${testId}/start`, { method: 'POST', headers: idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : undefined, body: JSON.stringify(payload) }),
+  startABTest: (testId: number, payload: { auto_deposit: boolean; confirmed_cpm?: number; deposit_rub?: number; funding_source?: 'auto' | 'account' | 'mutual' | 'bonus'; draft_fingerprint: string }, idempotencyKey?: string) => request<ABTest>(`/ab-tests/${testId}/start`, { method: 'POST', headers: idempotencyKey ? { 'X-Idempotency-Key': idempotencyKey } : undefined, body: JSON.stringify(payload) }),
   stopABTest: (testId: number) => request<ABTest>(`/ab-tests/${testId}/stop`, { method: 'POST' }),
   syncABTest: (testId: number) => request<ABTest>(`/ab-tests/${testId}/sync`, { method: 'POST' }),
   reconcileABTest: (testId: number) => request<ABTest>(`/ab-tests/${testId}/reconcile`, { method: 'POST' }),
+  rotateWBConnectionToken: (connectionId: number, token: string) => request<WBConnection>(`/wb/connections/${connectionId}/token`, { method: 'PATCH', body: JSON.stringify({ token }) }),
 };

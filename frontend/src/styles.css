@@ -1331,3 +1331,9 @@ h1 em, h2 em { color: #6e9bff; font-style: normal; }
   .hero-preview-footer b { display: none; }
   .hero-floating-note { min-width: 196px; }
 }
+.ab-incident-help{margin-top:10px;display:grid;gap:4px;padding-top:10px;border-top:1px solid rgba(255,255,255,.12)}
+.ab-incident-help b{font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.ab-incident-help span{font-size:13px;line-height:1.45}
+.ab-confirm-photos { display: flex; gap: 8px; margin: 14px 0; overflow: auto; }
+.ab-confirm-photos img { width: 64px; height: 84px; object-fit: cover; border-radius: 8px; }
+.ab-confirm-modal { max-height: 92vh; overflow-y: auto; }

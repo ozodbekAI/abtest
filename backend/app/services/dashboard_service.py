@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,12 @@ class DashboardService:
         if not connection:
             raise HTTPException(status_code=404, detail="Магазин Wildberries не найден")
 
-        today = date.today()
+        today = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Moscow")).date()
+        def start_date(test):
+            started = test.started_at
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            return started.astimezone(ZoneInfo("Europe/Moscow")).date()
         normalized_period = period.strip().lower()
         if normalized_period == "today":
             begin, end = today, today
@@ -55,13 +61,13 @@ class DashboardService:
             for test in tests
             if test.wb_campaign_id
             and test.started_at
-            and begin <= test.started_at.date() <= end
+            and begin <= start_date(test) <= end
         ]
         chart_by_date: dict[date, dict[str, int | float]] = defaultdict(
             lambda: {"tests": 0, "views": 0, "clicks": 0, "spend_rub": 0.0}
         )
         for test in period_tests:
-            point = chart_by_date[test.started_at.date()]
+            point = chart_by_date[start_date(test)]
             point["tests"] = int(point["tests"]) + 1
             point["views"] = int(point["views"]) + int(test.last_total_views or 0)
             point["clicks"] = int(point["clicks"]) + int(test.last_total_clicks or 0)
@@ -95,7 +101,7 @@ class DashboardService:
             "clicks": clicks,
             "spend_rub": spend_rub,
             "orders": orders,
-            "ctr": round((clicks / views) * 100, 2) if views else 0,
+            "ctr": round((clicks / views) * 100, 2) if views else None,
             "cpo_rub": round(spend_rub / orders, 2) if orders else None,
             "completed_campaign_count": completed_campaign_count,
             "failed_campaign_count": failed_campaign_count,
@@ -109,5 +115,5 @@ class DashboardService:
                 }
                 for day, point in sorted(chart_by_date.items())
             ],
-            "stats_complete": True,
+            "stats_complete": all(test.stats_quality in {"preliminary", "aggregate_unverified", "stage_attributed"} and test.last_synced_at for test in period_tests),
         }

@@ -60,7 +60,7 @@ export type DashboardStats = {
   clicks: number;
   spend_rub: number;
   orders: number;
-  ctr: number;
+  ctr: number | null;
   cpo_rub: number | null;
   completed_campaign_count: number;
   failed_campaign_count: number;
@@ -125,7 +125,7 @@ export type AdminTestItem = {
   total_clicks: number;
   total_orders: number;
   total_spend_rub: number;
-  total_ctr: number;
+  total_ctr: number | null;
   last_error?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
@@ -193,7 +193,7 @@ export type ABTestVariant = {
   views: number;
   clicks: number;
   orders: number;
-  ctr: number;
+  ctr: number | null;
   cpo?: number | null;
   spend_rub: number;
   is_winner: boolean;
@@ -226,17 +226,25 @@ export type ABTest = {
   unallocated_views: number;
   unallocated_clicks: number;
   unallocated_spend_rub: number;
+  funding_source: 'auto' | 'account' | 'mutual' | 'bonus' | string;
+  stage_views: number;
+  stage_clicks: number;
+  stage_spend_rub: number;
   total_views: number;
   total_clicks: number;
   total_orders: number;
   total_spend_rub: number;
-  total_ctr: number;
+  total_ctr: number | null;
   total_cpo?: number | null;
   last_error?: string | null;
   started_at?: string | null;
   finished_at?: string | null;
   last_synced_at?: string | null;
   created_at: string;
+  draft_fingerprint: string;
+  start_confirmation_fingerprint: string;
+  minimum_cpm?: number | null;
+  stage_exposure_views: number;
   variants: ABTestVariant[];
 };
 

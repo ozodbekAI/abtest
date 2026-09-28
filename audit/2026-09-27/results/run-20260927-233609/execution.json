@@ -1,0 +1,17 @@
+{
+  "stale_confirmation": {
+    "passed": false,
+    "error": "RuntimeError('Service exited; see backend/mock log')",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 279, in <module>\n    globals()[name]()\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 167, in stale_confirmation\n    setup(\"stale_confirmation\")\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 106, in setup\n    ready(\"http://127.0.0.1:18900/health\", BACK)\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 74, in ready\n    raise RuntimeError(\"Service exited; see backend/mock log\")\nRuntimeError: Service exited; see backend/mock log\n"
+  },
+  "overlap": {
+    "passed": false,
+    "error": "RuntimeError('Service exited; see backend/mock log')",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 279, in <module>\n    globals()[name]()\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 180, in overlap\n    setup(\"overlap\")\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 106, in setup\n    ready(\"http://127.0.0.1:18900/health\", BACK)\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 74, in ready\n    raise RuntimeError(\"Service exited; see backend/mock log\")\nRuntimeError: Service exited; see backend/mock log\n"
+  },
+  "control": {
+    "passed": false,
+    "error": "RuntimeError('Service exited; see backend/mock log')",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 279, in <module>\n    globals()[name]()\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 148, in control\n    setup(\"control\")\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 106, in setup\n    ready(\"http://127.0.0.1:18900/health\", BACK)\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 74, in ready\n    raise RuntimeError(\"Service exited; see backend/mock log\")\nRuntimeError: Service exited; see backend/mock log\n"
+  }
+}

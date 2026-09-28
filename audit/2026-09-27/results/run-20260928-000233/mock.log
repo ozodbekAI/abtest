@@ -1,0 +1,37 @@
+INFO:     Started server process [1324937]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:18901 (Press CTRL+C to quit)
+INFO:     127.0.0.1:32866 - "GET /_ctl/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "POST /_ctl/reset HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "POST /_ctl/setup HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52190 - "GET /c/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52198 - "GET /p/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52190 - "GET /common/api/v1/seller-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52214 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52228 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52242 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "GET /_ctl/photo/UPL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52258 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52268 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "GET /_ctl/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "GET /_ctl/events HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "POST /_ctl/reset HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "POST /_ctl/setup HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52280 - "GET /c/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52290 - "GET /p/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52280 - "GET /common/api/v1/seller-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52292 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52294 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52304 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "GET /_ctl/photo/UPL HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52312 - "GET /c/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52316 - "GET /p/ping HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52312 - "GET /common/api/v1/seller-info HTTP/1.1" 200 OK
+INFO:     127.0.0.1:52322 - "POST /c/content/v2/get/cards/list HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "GET /_ctl/state HTTP/1.1" 200 OK
+INFO:     127.0.0.1:32866 - "GET /_ctl/events HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1324937]

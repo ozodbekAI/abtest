@@ -11,11 +11,11 @@ class ABTestCreateRequest(BaseModel):
     nm_id: int = Field(gt=0)
     title: str = Field(min_length=2, max_length=512)
     skip_current_photo: bool = True
-    keep_winner_as_main: bool = True
+    keep_winner_as_main: bool = False
     delete_test_media: bool = True
-    views_per_variant: int = Field(default=1000, ge=300, le=1_000_000)
-    cpm_rub: int = Field(default=300, ge=1, le=1_000_000)
-    budget_rub: int = Field(default=1000, ge=1, le=100_000_000)
+    views_per_variant: int = Field(default=1000, ge=300, le=2_147_483_647)
+    cpm_rub: int = Field(default=300, ge=1, le=2_147_483_647)
+    budget_rub: int = Field(default=1000, ge=1, le=2_147_483_647)
     # The A/B workflow intentionally creates unified campaigns. Keep legacy
     # placement values accepted for old clients, but normalize them to the
     # single unified placement used by WB.
@@ -33,9 +33,15 @@ class ABTestCreateRequest(BaseModel):
 
 
 class ABTestStartRequest(BaseModel):
+    # SHA-256 fingerprint of the draft the user explicitly reviewed.
+    # The server rejects stale/mutated drafts before any external WB mutation.
+    draft_fingerprint: str = Field(min_length=64, max_length=64, pattern="^[0-9a-f]{64}$")
     auto_deposit: bool = False
     deposit_rub: int | None = Field(default=None, ge=1, le=100_000_000)
     funding_source: Literal["auto", "account", "mutual", "bonus"] = "auto"
+    # Required only when resuming a running test paused because WB raised its
+    # minimum CPM. It is intentionally separate from the draft's old CPM.
+    confirmed_cpm: int | None = Field(default=None, ge=1, le=100_000_000)
 
 
 class ABTestVariantSourceRequest(BaseModel):
@@ -59,7 +65,7 @@ class ABTestVariantResponse(BaseModel):
     wb_url: str | None = None
     views: int
     clicks: int
-    ctr: float
+    ctr: float | None = None
     spend_rub: float
     is_winner: bool
     orders: int = 0
@@ -93,10 +99,14 @@ class ABTestResponse(BaseModel):
     unallocated_views: int = 0
     unallocated_clicks: int = 0
     unallocated_spend_rub: float = 0
+    funding_source: str = "auto"
+    stage_views: int = 0
+    stage_clicks: int = 0
+    stage_spend_rub: float = 0
     total_views: int
     total_clicks: int
     total_spend_rub: float
-    total_ctr: float = 0
+    total_ctr: float | None = None
     total_orders: int = 0
     total_cpo: float | None = None
     last_error: str | None = None
@@ -104,6 +114,9 @@ class ABTestResponse(BaseModel):
     finished_at: datetime | None = None
     last_synced_at: datetime | None = None
     created_at: datetime
+    draft_fingerprint: str
+    start_confirmation_fingerprint: str
+    stage_exposure_views: int = 0
     variants: list[ABTestVariantResponse] = Field(default_factory=list)
 
 

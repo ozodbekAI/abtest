@@ -23,6 +23,9 @@ class WBController:
     async def validate(self, db: AsyncSession, user_id: int, connection_id: int | None = None) -> dict:
         return await WBTokenService(db).validate_saved(user_id, connection_id)
 
+    async def rotate_token(self, db: AsyncSession, user_id: int, connection_id: int, token: str) -> dict:
+        return await WBTokenService(db).rotate_token(user_id, connection_id, token)
+
     async def disconnect(self, db: AsyncSession, user_id: int, connection_id: int | None = None) -> None:
         service = WBTokenService(db)
         connection = await service.repository.get_for_user(user_id, connection_id)

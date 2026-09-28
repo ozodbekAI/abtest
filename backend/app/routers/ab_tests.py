@@ -25,6 +25,24 @@ router = APIRouter(prefix="/ab-tests", tags=["A/B-тесты"])
 controller = ABTestController()
 
 
+@router.get("/config")
+async def get_ab_test_config(current_user: User = Depends(get_current_user)):
+    """Return server-owned A/B-test limits used by the wizard.
+
+    Keeping these values on the server prevents the UI from silently drifting
+    from the actual budget/safety rules enforced by the backend.
+    """
+    from app.core.config import settings
+    from app.services.ab_test_budget import BUDGET_STEP_RUB, MIN_TEST_BUDGET_RUB
+    return {
+        "minimum_budget_rub": MIN_TEST_BUDGET_RUB,
+        "budget_step_rub": BUDGET_STEP_RUB,
+        "budget_guard_reserve_rub": int(getattr(settings, "ab_test_budget_guard_reserve_rub", 300) or 300),
+        "minimum_views_per_variant": 300,
+        "max_variants": 5,
+    }
+
+
 @router.get("/cards", response_model=ABTestCardsPageResponse)
 async def get_cards(
     connection_id: int = Query(gt=0),
@@ -131,7 +149,7 @@ async def delete_variant(
 @router.post("/{test_id}/start", response_model=ABTestResponse)
 async def start_test(
     test_id: int,
-    request: ABTestStartRequest = ABTestStartRequest(),
+    request: ABTestStartRequest,
     idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),

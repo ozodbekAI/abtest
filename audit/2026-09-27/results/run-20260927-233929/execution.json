@@ -1,0 +1,7 @@
+{
+  "control": {
+    "passed": false,
+    "error": "AssertionError('{\"detail\":{\"code\":\"confirmation_outdated\",\"message\":\"Безопасный бюджет теста пересчитан. Подтвердите запуск с новой суммой.\",\"draft_fingerprint\":\"92fca3661ffdf25373b2b570a7aa2ac7b7bc1ba9abbee0d4c87387d6056edffe\",\"recalculated_budget\":1500}}')",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 279, in <module>\n    globals()[name]()\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 152, in control\n    assert r.status_code == 200, r.text\n           ^^^^^^^^^^^^^^^^^^^^\nAssertionError: {\"detail\":{\"code\":\"confirmation_outdated\",\"message\":\"Безопасный бюджет теста пересчитан. Подтвердите запуск с новой суммой.\",\"draft_fingerprint\":\"92fca3661ffdf25373b2b570a7aa2ac7b7bc1ba9abbee0d4c87387d6056edffe\",\"recalculated_budget\":1500}}\n"
+  }
+}

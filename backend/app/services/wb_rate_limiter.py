@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 import asyncio
 from typing import AsyncIterator
@@ -15,14 +16,36 @@ from app.core.database import AsyncSessionLocal
 class WBRateLimiter:
     """Serialize seller-scoped WB mutations and fullstats requests."""
 
-    _locks: defaultdict[tuple[int, int, int], asyncio.Lock] = defaultdict(asyncio.Lock)
+    _locks: defaultdict[tuple[str, int], asyncio.Lock] = defaultdict(asyncio.Lock)
     _locks_guard = asyncio.Lock()
     FULLSTATS_INTERVAL_SECONDS = 20.2
+    _operation_owner: ContextVar[tuple[AsyncSession, int, str] | None] = ContextVar("wb_operation_owner", default=None)
 
     @classmethod
-    async def _lock_for(cls, connection_id: int, resource_id: int, seller_id: int | None = None) -> asyncio.Lock:
+    async def assert_lock_owned(cls) -> None:
+        """Fence a worker whose dedicated advisory-lock connection was lost."""
+        owner = cls._operation_owner.get()
+        if owner is None:
+            return
+        lock_db, backend_pid, lock_key = owner
+        result = await lock_db.execute(
+            text("""
+                SELECT pg_backend_pid() = :pid AND EXISTS (
+                    SELECT 1 FROM pg_locks
+                    WHERE pid = :pid AND locktype = 'advisory' AND granted
+                      AND classid = ((hashtext(:lock_key)::bigint >> 32) & 4294967295)::oid
+                      AND objid = (hashtext(:lock_key)::bigint & 4294967295)::oid
+                      AND objsubid = 1
+                )
+            """), {"pid": backend_pid, "lock_key": lock_key},
+        )
+        if not result.scalar():
+            raise RuntimeError("WB operation lock was lost; external mutation is fenced")
+
+    @classmethod
+    async def _lock_for(cls, scope_key: str, resource_id: int) -> asyncio.Lock:
         async with cls._locks_guard:
-            return cls._locks[(int(seller_id or 0), int(connection_id), int(resource_id))]
+            return cls._locks[(str(scope_key), int(resource_id))]
 
     @classmethod
     @asynccontextmanager
@@ -31,16 +54,25 @@ class WBRateLimiter:
         db: AsyncSession,
         connection_id: int,
         nm_id: int,
-        seller_id: int | None = None,
-    ) -> AsyncIterator[None]:
-        lock = await cls._lock_for(connection_id, nm_id, seller_id)
+        scope_key: str | int | None = None,
+        wait: bool = True,
+    ) -> AsyncIterator[bool]:
+        scope = str(scope_key or connection_id)
+        lock = await cls._lock_for(scope, nm_id)
+        if not wait and lock.locked():
+            yield False
+            return
         async with lock:
             lock_db: AsyncSession | None = None
-            lock_scope = int(seller_id or connection_id)
-            lock_key = f"wb-ab-test:{lock_scope}:{int(nm_id)}"
+            lock_key = f"wb-ab-test:{scope}:{int(nm_id)}"
+            owner_token = None
+            acquired = False
             try:
-                bind = db.get_bind()
-                if bind.dialect.name == "postgresql":
+                try:
+                    bind = db.get_bind()
+                except (AttributeError, RuntimeError):
+                    bind = None  # Lightweight deterministic unit-test sessions.
+                if bind is not None and bind.dialect.name == "postgresql":
                     # The service commits several durable checkpoints while
                     # one WB operation is in flight. An xact lock on ``db``
                     # would be released by the first checkpoint and another
@@ -48,24 +80,27 @@ class WBRateLimiter:
                     # Keep a dedicated DB session open and use a session-level
                     # advisory lock for the whole context instead.
                     lock_db = AsyncSessionLocal()
-                    await lock_db.execute(
-                        text("SELECT pg_advisory_lock(hashtext(:lock_key))"),
+                    result = await lock_db.execute(
+                        text("SELECT pg_advisory_lock(hashtext(:lock_key))" if wait else "SELECT pg_try_advisory_lock(hashtext(:lock_key))"),
                         {"lock_key": lock_key},
                     )
-            except (AttributeError, RuntimeError):
-                # Lightweight unit-test sessions may not expose a bind.
-                if lock_db is not None:
-                    await lock_db.close()
-                    lock_db = None
-            try:
-                yield
+                    acquired = wait or bool(result.scalar())
+                    if not acquired:
+                        yield False
+                        return
+                    backend_pid = int(await lock_db.scalar(text("SELECT pg_backend_pid()")))
+                    owner_token = cls._operation_owner.set((lock_db, backend_pid, lock_key))
+                yield True
             finally:
+                if owner_token is not None:
+                    cls._operation_owner.reset(owner_token)
                 if lock_db is not None:
                     try:
-                        await lock_db.execute(
-                            text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
-                            {"lock_key": lock_key},
-                        )
+                        if acquired:
+                            await lock_db.execute(
+                                text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
+                                {"lock_key": lock_key},
+                            )
                     finally:
                         await lock_db.close()
 
@@ -73,7 +108,7 @@ class WBRateLimiter:
     @asynccontextmanager
     async def stats_lock(cls, db: AsyncSession, connection_id: int) -> AsyncIterator[None]:
         """Reserve a fullstats slot across every worker process."""
-        lock = await cls._lock_for(connection_id, 0)
+        lock = await cls._lock_for(f"connection:{int(connection_id)}", 0)
         async with lock:
             wait_for = 0.0
             try:

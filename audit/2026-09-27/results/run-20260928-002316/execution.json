@@ -1,0 +1,25 @@
+{
+  "control": {
+    "passed": true
+  },
+  "stale_confirmation": {
+    "passed": true
+  },
+  "overlap": {
+    "passed": true
+  },
+  "repeat_start": {
+    "passed": true
+  },
+  "pause_failure": {
+    "passed": true
+  },
+  "external_edit": {
+    "passed": true
+  },
+  "retry_photo": {
+    "passed": false,
+    "error": "AssertionError('{\"detail\":{\"code\":\"reconciliation_required\",\"message\":\"Кампания остановлена, но восстановление фото не подтверждено. Инцидент INC-009457423473. Карточка WB была изменена извне (slot 1: bytes, slot 4: bytes). Перезапись заблокирована.\",\"incident_id\":\"INC-009457423473\"}}')",
+    "traceback": "Traceback (most recent call last):\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 285, in <module>\n    globals()[name]()\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/audit/2026-09-27/run.py\", line 267, in retry_photo\n    assert r.status_code == 200, r.text\n           ^^^^^^^^^^^^^^^^^^^^\nAssertionError: {\"detail\":{\"code\":\"reconciliation_required\",\"message\":\"Кампания остановлена, но восстановление фото не подтверждено. Инцидент INC-009457423473. Карточка WB была изменена извне (slot 1: bytes, slot 4: bytes). Перезапись заблокирована.\",\"incident_id\":\"INC-009457423473\"}}\n"
+  }
+}

@@ -33,7 +33,9 @@ class ABTestScheduler:
         while True:
             try:
                 async with AsyncSessionLocal() as db:
-                    await ABTestService(db).scheduler_tick()
+                    service = ABTestService(db)
+                    await service.scheduler_tick()
+                    await service.dispatch_incident_notifications()
             except asyncio.CancelledError:
                 raise
             except Exception:

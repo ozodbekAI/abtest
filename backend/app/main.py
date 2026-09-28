@@ -42,9 +42,19 @@ def _check_required_schema(sync_connection) -> None:
             "unallocated_views",
             "unallocated_clicks",
             "unallocated_spend_rub",
+            "store_fingerprint",
+            "lifecycle_lock",
+            "stage_views",
+            "stage_clicks",
+            "stage_spend_rub",
+            "funding_source",
+            "settled_total_views",
+            "settled_total_clicks",
+            "settled_total_orders",
+            "settled_total_spend_rub",
         },
         "ab_test_operations": {"operation_key", "status", "request_snapshot", "response_snapshot"},
-        "wb_connections": {"analytics_access", "statistics_access", "ready_for_ab_tests"},
+        "wb_connections": {"analytics_access", "statistics_access", "ready_for_ab_tests", "token_fingerprint", "seller_id", "write_access"},
     }
     missing: list[str] = []
     for table, columns in required_columns.items():
@@ -53,6 +63,12 @@ def _check_required_schema(sync_connection) -> None:
             continue
         existing = {column["name"] for column in inspector.get_columns(table)}
         missing.extend(f"{table}.{column}" for column in sorted(columns - existing))
+    if not inspector.has_table("ab_test_audit_event_archive"):
+        missing.append("таблица ab_test_audit_event_archive")
+    if not inspector.has_table("ab_test_incident_notifications"):
+        missing.append("таблица ab_test_incident_notifications")
+    if not inspector.has_table("ab_test_budget_entries"):
+        missing.append("таблица ab_test_budget_entries")
     if not inspector.has_table("admin_audit_logs"):
         missing.append("таблица admin_audit_logs")
     if missing:
@@ -66,6 +82,47 @@ def _check_required_schema(sync_connection) -> None:
 async def ensure_schema_ready() -> None:
     async with engine.connect() as connection:
         await connection.run_sync(_check_required_schema)
+
+
+async def ensure_wb_token_fingerprints() -> None:
+    """Backfill deterministic WB-token fingerprints for legacy connections.
+
+    Alembic cannot decrypt Fernet values safely during a schema migration.
+    This one-time application-level backfill runs after configuration is loaded
+    and is idempotent.
+    """
+    from sqlalchemy import select
+    from app.models.wb_connection import WBConnection
+    from app.services.wb_token_service import WBTokenService
+
+    async with AsyncSessionLocal() as db:
+        rows = list((await db.scalars(select(WBConnection).where(WBConnection.token_fingerprint == ""))).all())
+        changed = 0
+        for row in rows:
+            try:
+                token = WBTokenService.decrypt_token(row.token_encrypted)
+            except Exception:
+                continue
+            row.token_fingerprint = hashlib.sha256(token.strip().encode()).hexdigest()
+            changed += 1
+
+        # Legacy AB tests created before the store-level lock migration also
+        # need their store fingerprint populated. Otherwise a new connection
+        # for the same WB cabinet could bypass the unique store+nmID lock.
+        connections = {
+            int(row.id): row.token_fingerprint
+            for row in (await db.scalars(select(WBConnection))).all()
+            if row.token_fingerprint
+        }
+        from app.models.ab_test import ABTest
+        legacy_tests = list((await db.scalars(select(ABTest).where(ABTest.store_fingerprint == ""))).all())
+        for test in legacy_tests:
+            fingerprint = connections.get(int(test.connection_id))
+            if fingerprint:
+                test.store_fingerprint = fingerprint
+                changed += 1
+        if changed:
+            await db.commit()
 
 
 async def ensure_configured_admin() -> None:
@@ -107,6 +164,7 @@ async def lifespan(_: FastAPI):
             await connection.run_sync(Base.metadata.create_all)
     await ensure_schema_ready()
     await ensure_configured_admin()
+    await ensure_wb_token_fingerprints()
     scheduler = ABTestScheduler()
     scheduler.start()
     yield

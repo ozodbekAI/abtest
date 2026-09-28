@@ -12,6 +12,29 @@ logger = logging.getLogger(__name__)
 
 
 class EmailService:
+    async def send_incident(self, *, recipient: str, incident_id: str, subject: str, body: str) -> None:
+        """Deliver a safety incident without exposing WB credentials."""
+        _, sender_address = parseaddr(settings.email_from)
+        sender_address = sender_address or settings.email_from
+        message = EmailMessage()
+        message["From"] = formataddr(("AVEMOD", sender_address))
+        message["To"] = recipient
+        message["Subject"] = subject
+        message.set_content(f"Инцидент {incident_id}\n\n{body}\n\nНе повторяйте пополнение, пока результат операции не подтверждён.")
+        if not settings.smtp_host:
+            if settings.app_env == "production":
+                raise RuntimeError("SMTP_HOST must be configured in production")
+            logger.warning("Incident notification delivery is not configured. incident=%s recipient=%s", incident_id, recipient)
+            return
+        smtp = SMTP(hostname=settings.smtp_host, port=settings.smtp_port, start_tls=True)
+        await smtp.connect()
+        try:
+            if settings.smtp_user:
+                await smtp.login(settings.smtp_user, settings.smtp_password)
+            await smtp.send_message(message)
+        finally:
+            await smtp.quit()
+
     async def send_code(self, *, recipient: str, code: str, purpose: str) -> None:
         is_verification = purpose == "email_verification"
         subject = "AVEMOD — Подтверждение электронной почты" if is_verification else "AVEMOD — Восстановление пароля"

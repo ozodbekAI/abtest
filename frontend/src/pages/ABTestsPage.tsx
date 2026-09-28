@@ -8,6 +8,7 @@ import { AppShell } from '../components/AppShell';
 import { StoreSwitcher } from '../components/StoreSwitcher';
 import type { ABTest, ABTestCard, ABTestCardCursor, WBConnection, WBPromotionBalance } from '../types';
 import { imageUrl } from '../utils/media';
+import { testStatusLabel, needsReconciliation } from '../utils/abTestState';
 import { publishActiveStoreId, readActiveStoreId, subscribeActiveStoreId } from '../utils/activeStore';
 
 type Filter = 'all' | 'running' | 'draft' | 'finished' | 'failed';
@@ -18,7 +19,14 @@ type TestImage =
   | { kind: 'main'; url: string; name: string };
 type TestSlot = TestImage | null;
 type FundingSource = 'account' | 'mutual' | 'bonus';
+type BudgetConfig = { minimumBudgetRub: number; budgetStepRub: number; budgetGuardReserveRub: number };
 type StartConfirmation = {
+  storeName: string;
+  nmId: number;
+  views: number;
+  forecast: number;
+  reserve: number;
+  photos: string[];
   autoDeposit: boolean;
   cpm: number;
   requiredBudget: number;
@@ -27,6 +35,9 @@ type StartConfirmation = {
 };
 type MinimumCpmConfirmation = {
   testId: number;
+  snapshot: ABTest;
+  sourceLabel: string;
+  autoDeposit: boolean;
   minimumCpm: number;
   recalculatedBudget: number;
   message: string;
@@ -87,21 +98,17 @@ async function validateUploadFile(file: File): Promise<string | null> {
   return null;
 }
 
-function statusLabel(status: string, operationState?: string) {
-  if (operationState === 'reconciliation_required') return 'Требуется сверка';
-  return ({ running: 'Активный', draft: 'Черновик', finished: 'Завершён', failed: 'Требуется сверка', stopped: 'Остановлен' } as Record<string, string>)[status] || status;
-}
-
 function isIncident(test: ABTest) {
-  return test.operation_state === 'reconciliation_required' || test.status === 'failed' || test.status === 'stopped';
+  return needsReconciliation(test);
 }
 
 function formatNumber(value: number) { return new Intl.NumberFormat('ru-RU').format(Math.round(value || 0)); }
 function formatRub(value: number) { return `${new Intl.NumberFormat('ru-RU').format(Math.round(value || 0))} ₽`; }
-const MIN_TEST_BUDGET_RUB = 1200;
-function calculateRequiredBudget(photosCount: number, viewsPerVariant: number, cpmRub: number) {
+const DEFAULT_MIN_TEST_BUDGET_RUB = 1200;
+function calculateRequiredBudget(photosCount: number, viewsPerVariant: number, cpmRub: number, minimumBudget = DEFAULT_MIN_TEST_BUDGET_RUB, budgetStep = 100, safetyReserve = 300) {
   const rawSpendRub = Math.ceil((Math.max(0, photosCount) * Math.max(0, viewsPerVariant) * Math.max(0, cpmRub)) / 1000);
-  return Math.ceil(Math.max(rawSpendRub, MIN_TEST_BUDGET_RUB) / 100) * 100;
+  const protectedBudget = Math.max(rawSpendRub, minimumBudget) + Math.max(0, safetyReserve);
+  return Math.ceil(protectedBudget / budgetStep) * budgetStep;
 }
 function newOperationKey(testId: number) {
   return typeof crypto !== 'undefined' && crypto.randomUUID
@@ -113,6 +120,8 @@ export function ABTestsPage() {
   const navigate = useNavigate();
   const [connections, setConnections] = useState<WBConnection[]>([]);
   const [activeId, setActiveId] = useState<number | null>(() => readActiveStoreId());
+  const [abConfig, setAbConfig] = useState<BudgetConfig | null>(null);
+  const [configError, setConfigError] = useState(false);
   const [tests, setTests] = useState<ABTest[]>([]);
   const [filter, setFilter] = useState<Filter>('all');
   const [loading, setLoading] = useState(true);
@@ -152,6 +161,7 @@ export function ABTestsPage() {
   };
 
   useEffect(() => { void loadConnections(); }, []);
+  useEffect(() => { void api.getABTestConfig().then((cfg) => setAbConfig({ minimumBudgetRub: cfg.minimum_budget_rub, budgetStepRub: cfg.budget_step_rub, budgetGuardReserveRub: cfg.budget_guard_reserve_rub })).catch(() => setConfigError(true)); }, []);
   useEffect(() => { if (activeConnection) void loadTests(); }, [activeConnection?.id]);
   useEffect(() => subscribeActiveStoreId((id) => {
     if (id === activeId) return;
@@ -167,13 +177,14 @@ export function ABTestsPage() {
 
   return <AppShell>
     <div className="page-wrap ab-tests-page">
-      <div className="page-heading ab-heading"><div><div className="eyebrow eyebrow-dark"><FlaskConical size={14} /> ЭКСПЕРИМЕНТЫ</div><h1>A/B-тесты изображений</h1><p>Сравнивайте креативы на реальном трафике Wildberries.</p></div><div className="page-heading-actions">{activeConnection && <StoreSwitcher connections={connections} activeConnection={activeConnection} onSelect={setStore} />}<button className="primary-button" onClick={() => setCreateOpen(true)} disabled={!activeConnection?.ready_for_ab_tests}><Plus size={17} /> Создать тест</button></div></div>
+      {configError && <div className="ab-error-banner" role="alert">Не удалось получить действующие денежные ограничения. Создание тестов заблокировано; обновите страницу.</div>}
+      <div className="page-heading ab-heading"><div><div className="eyebrow eyebrow-dark"><FlaskConical size={14} /> ЭКСПЕРИМЕНТЫ</div><h1>A/B-тесты изображений</h1><p>Сравнивайте креативы на реальном трафике Wildberries.</p></div><div className="page-heading-actions">{activeConnection && <StoreSwitcher connections={connections} activeConnection={activeConnection} onSelect={setStore} />}<button className="primary-button" onClick={() => setCreateOpen(true)} disabled={!activeConnection?.ready_for_ab_tests || !abConfig}><Plus size={17} /> Создать тест</button></div></div>
       {!activeConnection && connectionsError && <EmptyState title="Не удалось загрузить магазины" text={connectionsError} action={<button className="primary-button" onClick={() => void loadConnections()}><RefreshCw size={16} /> Повторить</button>} />}
       {!activeConnection && !connectionsError && <EmptyState title="Сначала подключите магазин" text="Для создания эксперимента нужен токен WB с доступом к «Контенту» и «Продвижению»." action={<Link to="/settings" className="primary-button">Открыть настройки <ArrowRight size={16} /></Link>} />}
       {activeConnection && !activeConnection.ready_for_ab_tests && <div className="ab-access-warning"><CircleAlert size={19} /><div><strong>Магазин не готов к A/B-тестам</strong><span>Проверьте доступ токена к категориям «Контент» и «Продвижение».</span></div><Link to="/settings" className="outline-button compact">Проверить доступ</Link></div>}
       {activeConnection && <><div className="ab-overview-grid"><OverviewCard icon={<FlaskConical />} label="Всего тестов" value={tests.length.toString()} /><OverviewCard icon={<Play />} label="Активные" value={tests.filter((test) => test.status === 'running').length.toString()} accent="green" /><OverviewCard icon={<Trophy />} label="Завершены" value={tests.filter((test) => test.status === 'finished').length.toString()} accent="violet" /><OverviewCard icon={<Target />} label="Показы собрано" value={formatNumber(tests.reduce((sum, test) => sum + test.total_views, 0))} /></div><div className="ab-list-toolbar"><div><h2>Ваши эксперименты</h2><p>Каждый тест работает только с выбранным магазином.</p></div><div className="ab-tabs">{([['all', 'Все'], ['running', 'Активные'], ['draft', 'Черновики'], ['finished', 'Завершённые'], ['failed', 'Ошибки']] as [Filter, string][]).map(([value, label]) => <button key={value} className={filter === value ? 'active' : ''} onClick={() => setFilter(value)}>{label}<span>{value === 'all' ? tests.length : tests.filter((test) => value === 'failed' ? isIncident(test) : test.status === value).length}</span></button>)}</div></div>{testsError && <div className="ab-error-banner reconciliation"><CircleAlert size={18} /><div><strong>Не удалось обновить список тестов</strong><span>{testsError}</span></div><button className="outline-button compact" onClick={() => void loadTests()}><RefreshCw size={15} /> Повторить</button></div>}{loading ? <div className="ab-loading"><LoaderCircle className="spin" size={23} /> Загружаем эксперименты…</div> : visibleTests.length ? <div className="ab-test-list">{visibleTests.map((test) => <TestRow key={test.id} test={test} onOpen={() => navigate(`/ab-tests/${test.id}`)} />)}</div> : <EmptyState title={filter === 'all' ? 'Экспериментов пока нет' : 'В этом разделе пусто'} text="Создайте тест из двух и более изображений, чтобы начать сравнение." action={<button className="primary-button" onClick={() => setCreateOpen(true)}><Plus size={16} /> Создать первый тест</button>} />}</>}
     </div>
-    {createOpen && <CreateTestModal connection={activeConnection} onClose={() => setCreateOpen(false)} onCreated={(test) => { setCreateOpen(false); navigate(`/ab-tests/${test.id}`); }} />}
+    {createOpen && abConfig && <CreateTestModal abConfig={abConfig} connection={activeConnection} onClose={() => setCreateOpen(false)} onCreated={(test) => { setCreateOpen(false); navigate(`/ab-tests/${test.id}`); }} />}
   </AppShell>;
 }
 
@@ -183,19 +194,20 @@ function OverviewCard({ icon, label, value, accent = '' }: { icon: React.ReactNo
 
 function TestRow({ test, onOpen }: { test: ABTest; onOpen: () => void }) {
   const preview = test.variants.find((variant) => variant.position === (test.winner_variant_order || test.current_variant_order))?.image_url || test.variants.find((variant) => variant.position > 0)?.image_url;
-  return <button className="ab-test-row" onClick={onOpen}><div className="ab-test-preview">{preview ? <AuthenticatedImage src={imageUrl(preview, `test-${test.id}`)} alt="" /> : <ImagePlus size={22} />}</div><div className="ab-test-info"><div className="ab-test-title"><strong>{test.title}</strong><span className={`ab-status ${test.status}`}>{test.status === 'running' && <i />}{statusLabel(test.status, test.operation_state)}</span></div><p>Артикул {test.nm_id} · Магазин «{test.store_name}» · {test.variants.filter((variant) => variant.source_type !== 'control').length} вариантов</p></div><div className="ab-test-stat"><small>Показы</small><strong>{formatNumber(test.total_views)}</strong></div><div className="ab-test-stat"><small>CTR</small><strong>{test.total_views ? `${((test.total_clicks / test.total_views) * 100).toFixed(2)}%` : '—'}</strong></div><div className="ab-test-action"><ArrowRight size={18} /></div></button>;
+  return <button className="ab-test-row" onClick={onOpen}><div className="ab-test-preview">{preview ? <AuthenticatedImage src={imageUrl(preview, `test-${test.id}`)} alt="" /> : <ImagePlus size={22} />}</div><div className="ab-test-info"><div className="ab-test-title"><strong>{test.title}</strong><span className={`ab-status ${test.status}`}>{test.status === 'running' && <i />}{testStatusLabel(test)}</span></div><p>Артикул {test.nm_id} · Магазин «{test.store_name}» · {test.variants.filter((variant) => variant.source_type !== 'control').length} вариантов</p></div><div className="ab-test-stat"><small>Показы</small><strong>{formatNumber(test.total_views)}</strong></div><div className="ab-test-stat"><small>CTR</small><strong>{test.total_views ? `${((test.total_clicks / test.total_views) * 100).toFixed(2)}%` : '—'}</strong></div><div className="ab-test-action"><ArrowRight size={18} /></div></button>;
 }
 
 function EmptyState({ title, text, action }: { title: string; text: string; action: React.ReactNode }) {
   return <div className="ab-empty"><span><Sparkles size={20} /></span><h3>{title}</h3><p>{text}</p>{action}</div>;
 }
 
-function CreateTestModal({ connection, onClose, onCreated }: { connection: WBConnection | null; onClose: () => void; onCreated: (test: ABTest) => void }) {
+function CreateTestModal({ connection, abConfig, onClose, onCreated }: { connection: WBConnection | null; abConfig: BudgetConfig; onClose: () => void; onCreated: (test: ABTest) => void }) {
   const [step, setStep] = useState<WizardStep>(1);
   const [search, setSearch] = useState('');
   const [cards, setCards] = useState<ABTestCard[]>([]);
   const [nextCursor, setNextCursor] = useState<ABTestCardCursor | null>(null);
   const [nextLoading, setNextLoading] = useState(false);
+  const [visibleCardCount, setVisibleCardCount] = useState(8);
   const [card, setCard] = useState<ABTestCard | null>(null);
   const [photoPickerIndex, setPhotoPickerIndex] = useState<number | null>(null);
   const [files, setFiles] = useState<TestSlot[]>([null, null, null, null]);
@@ -214,6 +226,10 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
   const [busy, setBusy] = useState(false);
   const [validatingIndex, setValidatingIndex] = useState<number | null>(null);
   const [cardLoading, setCardLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogReload, setCatalogReload] = useState(0);
+  const catalogGeneration = useRef(0);
+  const seenCursors = useRef(new Set<string>());
   const [startConfirmation, setStartConfirmation] = useState<StartConfirmation | null>(null);
   const [minimumCpmConfirmation, setMinimumCpmConfirmation] = useState<MinimumCpmConfirmation | null>(null);
   const objectUrls = useRef(new Map<File, string>());
@@ -236,7 +252,7 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
   const comparisonReady = testedVariantCount >= 2 && testedVariantCount <= MAX_TEST_IMAGES;
   const safeViews = Number.isFinite(views) && views > 0 ? views : 0;
   const safeCpm = Number.isFinite(cpm) && cpm > 0 ? cpm : 0;
-  const estimatedBudget = calculateRequiredBudget(testedVariantCount, safeViews, safeCpm);
+  const estimatedBudget = calculateRequiredBudget(testedVariantCount, safeViews, safeCpm, abConfig.minimumBudgetRub, abConfig.budgetStepRub, abConfig.budgetGuardReserveRub);
   // The campaign budget is derived from the actual test stages. There is no
   // second manual value that could disagree with CPM × impressions.
   const budget = estimatedBudget;
@@ -334,7 +350,13 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
     let active = true;
     const controller = new AbortController();
     setCards([]);
+    setCatalogError(null);
+    setNextLoading(false);
+    setCardLoading(true);
+    catalogGeneration.current += 1;
+    seenCursors.current.clear();
     setNextCursor(null);
+    setVisibleCardCount(8);
     const timer = window.setTimeout(() => {
       setCardLoading(true);
       const loadPages = async () => {
@@ -342,26 +364,42 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
         // explicitly by the user to keep the modal responsive on large catalogs.
         const result = await api.getABTestCards(connection.id, search, controller.signal);
         if (!active) return;
-        setCards(result.items);
+        setCards([...new Map(result.items.map((item) => [item.nm_id, item])).values()]);
+        setVisibleCardCount(8);
         setNextCursor(result.next_cursor || null);
       };
-      void loadPages().catch((error: any) => { if (active && error?.name !== 'AbortError') toast.error(error?.message || 'Не удалось загрузить карточки'); })
+      void loadPages().catch((error: any) => { if (active && error?.name !== 'AbortError') setCatalogError(error?.message || 'Не удалось загрузить карточки'); })
         .finally(() => { if (active) setCardLoading(false); });
     }, 280);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
-  }, [connection?.id, search, connection?.ready_for_ab_tests, card]);
+  }, [connection?.id, search, connection?.ready_for_ab_tests, card, catalogReload]);
 
   const loadNextCards = async () => {
-    if (!connection || !nextCursor || nextLoading) return;
+    if (!connection || nextLoading) return;
+    if (visibleCardCount < cards.length) {
+      setVisibleCardCount((value) => value + 8);
+      return;
+    }
+    if (!nextCursor) return;
+    const generation = catalogGeneration.current;
+    const cursorKey = JSON.stringify([nextCursor.updatedAt, nextCursor.nmID || nextCursor.nmId]);
     setNextLoading(true);
+    setCatalogError(null);
     try {
       const result = await api.getABTestCards(connection.id, search, undefined, nextCursor);
-      setCards((current) => [...current, ...result.items]);
-      setNextCursor(result.next_cursor || null);
+      if (generation !== catalogGeneration.current) return;
+      const followingKey = result.next_cursor ? JSON.stringify([result.next_cursor.updatedAt, result.next_cursor.nmID || result.next_cursor.nmId]) : null;
+      setCards((current) => [...new Map([...current, ...result.items].map((item) => [item.nm_id, item])).values()]);
+      setVisibleCardCount((value) => value + 8);
+      seenCursors.current.add(cursorKey);
+      if (followingKey && seenCursors.current.has(followingKey)) {
+        setNextCursor(null);
+        setCatalogError('WB повторил страницу каталога. Список неполный. Обновите каталог или найдите товар по артикулу.');
+      } else setNextCursor(result.next_cursor || null);
     } catch (error: any) {
-      toast.error(error?.message || 'Не удалось загрузить следующие карточки');
+      if (generation === catalogGeneration.current) setCatalogError(error?.message || 'Следующая страница не получена. Список неполный; повторите загрузку.');
     } finally {
-      setNextLoading(false);
+      if (generation === catalogGeneration.current) setNextLoading(false);
     }
   };
 
@@ -417,6 +455,8 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
       }
       setFiles((current) => current.map((item, position) => position === index ? { kind: 'upload', file, previewUrl } : item));
       toast.success(tiff ? 'TIFF конвертирован в JPEG для предпросмотра.' : 'Фото добавлено в слот. Оно загрузится при запуске теста.');
+    } catch (error: any) {
+      toast.error(error?.message || 'Не удалось подготовить изображение');
     } finally {
       input.value = '';
       setValidatingIndex((current) => current === index ? null : current);
@@ -463,7 +503,8 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
     setBusy(true);
     try {
       const latest = await api.getABTest(pending.testId);
-      const retried = await api.startABTest(latest.id, { auto_deposit: autoDeposit, funding_source: autoDeposit ? fundingSource : 'auto' }, newOperationKey(latest.id));
+      if (latest.start_confirmation_fingerprint !== pending.snapshot.start_confirmation_fingerprint) throw new Error('Параметры изменились после показа подтверждения. Проверьте черновик заново.');
+      const retried = await api.startABTest(latest.id, { auto_deposit: pending.autoDeposit, deposit_rub: pending.autoDeposit ? pending.recalculatedBudget : undefined, funding_source: pending.autoDeposit ? fundingSource : 'auto', draft_fingerprint: latest.start_confirmation_fingerprint }, newOperationKey(latest.id));
       toast.success('CPM обновлён, A/B-тест запущен');
       onCreated(retried);
     } catch (error: any) {
@@ -488,7 +529,8 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
           : await api.setABTestVariantSource(test.id, index + 1, image.url);
         createdTest = test;
       }
-      test = await api.startABTest(test.id, { auto_deposit: autoDeposit, funding_source: autoDeposit ? fundingSource : 'auto' }, newOperationKey(test.id));
+      if (test.budget_rub !== startConfirmation.requiredBudget || test.cpm_rub !== startConfirmation.cpm || test.views_per_variant !== startConfirmation.views) throw new Error('Серверный расчёт отличается от подтверждённых условий. Запуск не отправлен; проверьте черновик.');
+      test = await api.startABTest(test.id, { auto_deposit: startConfirmation.autoDeposit, deposit_rub: startConfirmation.autoDeposit ? startConfirmation.requiredBudget : undefined, funding_source: startConfirmation.autoDeposit ? fundingSource : 'auto', draft_fingerprint: test.start_confirmation_fingerprint }, newOperationKey(test.id));
       toast.success('A/B-тест запущен');
       onCreated(test);
     } catch (error: any) {
@@ -501,10 +543,18 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
         setCpm(safeMinimumCpm);
         setMinimumCpmConfirmation({
           testId: createdTest.id,
+          snapshot: await api.getABTest(createdTest.id),
+          sourceLabel: fundingSourceLabel(fundingSource),
+          autoDeposit,
           minimumCpm: safeMinimumCpm,
           recalculatedBudget: safeRecalculatedBudget,
           message: detail.message || 'Минимальная ставка Wildberries изменилась.',
         });
+        return;
+      }
+      if (detail?.code === 'confirmation_outdated' && createdTest) {
+        try { onCreated(await api.getABTest(createdTest.id)); } catch { onCreated(createdTest); }
+        toast.error(detail?.message || 'Параметры теста изменились. Подтвердите запуск заново.');
         return;
       }
       toast.error(error?.message || 'Не удалось запустить A/B-тест');
@@ -527,12 +577,18 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
     if (step < 3) { goNext(); return; }
     if (!connection || !card) { toast.error('Выберите карточку товара'); return; }
     if (!comparisonReady) { toast.error(testedVariantCount > MAX_TEST_IMAGES ? `В одном тесте можно сравнивать максимум ${MAX_TEST_IMAGES} изображения` : skipCurrent ? 'Добавьте минимум два изображения для сравнения' : 'Добавьте ещё одно изображение: главное фото участвует в тесте'); setStep(2); return; }
-    if (views < 300) { toast.error('Для надёжного результата укажите минимум 300 показов на вариант'); return; }
+    if (!Number.isSafeInteger(views) || views < 300 || views > 1000000 || !Number.isSafeInteger(cpm) || cpm < 1 || cpm > 1000000 || !Number.isSafeInteger(estimatedBudget) || estimatedBudget > 100000000) { toast.error('Показы: целое число от 300 до 1 000 000; CPM: целое число от 1 до 1 000 000 ₽; бюджет не более 100 000 000 ₽.'); return; }
     if (autoDeposit && !fundingReady) {
       toast.error(balanceError || `В выбранном источнике недостаточно средств для бюджета ${requiredBudget.toLocaleString('ru-RU')} ₽`);
       return;
     }
     setStartConfirmation({
+      storeName: connection.store_name,
+      nmId: card.nm_id,
+      views,
+      forecast: Math.ceil(testedVariantCount * views * cpm / 1000),
+      reserve: abConfig.budgetGuardReserveRub,
+      photos: [...(!skipCurrent && card.main_photo_url ? [card.main_photo_url] : []), ...testImages.map((item) => item.kind === 'upload' ? previews[files.indexOf(item)] || '' : item.url)],
       autoDeposit,
       cpm,
       requiredBudget,
@@ -542,16 +598,14 @@ function CreateTestModal({ connection, onClose, onCreated }: { connection: WBCon
   };
 
 
-  const renderParametersStep = () => <section className="wizard-panel wizard-params-step"><div className="wizard-panel-heading"><span className="wizard-number">03</span><div><h3>Параметры и запуск</h3><p>Укажите название теста, объём данных и бюджет продвижения.</p></div></div><div className="wizard-fields"><label className="ab-field wizard-field-wide">Название теста<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, Весенний креатив" required /></label><div className="ab-fields-two"><label className="ab-field">Показы на вариант<input type="number" min={300} max={1000000} value={views} onChange={(event) => setViews(Number(event.target.value))} /><small>Минимум 300 показов</small></label><label className="ab-field">CPM, ₽<input type="number" min={1} value={cpm} onChange={(event) => setCpm(Number(event.target.value))} /><small>Ставка за 1 000 показов</small></label></div><label className="ab-field">Минимальный бюджет кампании, ₽<input type="number" min={1} value={budget} readOnly aria-label="Минимальный бюджет рассчитан автоматически" /><small>CPM × показы × этапы; минимум 1 200 ₽, округление вверх до 100 ₽</small></label><div className="wizard-unified-note"><span>Тип ставки</span><strong>Единая ставка · поиск и рекомендации</strong></div></div><FundingSourcePanel balance={promotionBalance} loading={balanceLoading} error={balanceError} source={fundingSource} onSourceChange={setFundingSource} onRefresh={() => void loadPromotionBalance()} autoDeposit={autoDeposit} requiredBudget={requiredBudget} /><div className="wizard-budget-card"><div><span>Расчёт запуска</span><strong>{requiredBudget.toLocaleString('ru-RU')} ₽</strong></div><div><small>{testedVariantCount} этапа · {views.toLocaleString('ru-RU')} показов на каждый</small><small>При CPM {cpm.toLocaleString('ru-RU')} ₽ · {autoDeposit ? 'автопополнение включено' : 'автопополнение отключено'}</small></div></div><div className="wizard-final-note"><ShieldIcon /><span>Перед запуском сервис ещё раз проверит доступ токена к «Контенту» и «Продвижению».</span></div></section>;
+  const renderParametersStep = () => <section className="wizard-panel wizard-params-step"><div className="wizard-panel-heading"><span className="wizard-number">03</span><div><h3>Параметры и запуск</h3><p>Укажите название теста, объём данных и бюджет продвижения.</p></div></div><div className="wizard-fields"><label className="ab-field wizard-field-wide">Название теста<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, Весенний креатив" required /></label><div className="ab-fields-two"><label className="ab-field">Показы на вариант<input type="number" min={300} max={1000000} step={1} value={views} onChange={(event) => setViews(Number(event.target.value))} /><small>Минимум 300 показов</small></label><label className="ab-field">CPM, ₽<input type="number" min={1} max={1000000} step={1} value={cpm} onChange={(event) => setCpm(Number(event.target.value))} /><small>Ставка за 1 000 показов</small></label></div><label className="ab-field">Минимальный бюджет кампании, ₽<input type="number" min={1} value={budget} readOnly aria-label="Минимальный бюджет рассчитан автоматически" /><small>Прогноз {formatRub(Math.ceil(testedVariantCount * safeViews * safeCpm / 1000))}; резерв {formatRub(abConfig.budgetGuardReserveRub)} внутри предела. Минимум {abConfig.minimumBudgetRub.toLocaleString('ru-RU')} ₽, шаг {abConfig.budgetStepRub.toLocaleString('ru-RU')} ₽</small></label><div className="wizard-unified-note"><span>Тип ставки</span><strong>Единая ставка · поиск и рекомендации</strong></div></div><FundingSourcePanel balance={promotionBalance} loading={balanceLoading} error={balanceError} source={fundingSource} onSourceChange={setFundingSource} onRefresh={() => void loadPromotionBalance()} autoDeposit={autoDeposit} requiredBudget={requiredBudget} /><div className="wizard-budget-card"><div><span>Расчёт запуска</span><strong>{requiredBudget.toLocaleString('ru-RU')} ₽</strong></div><div><small>{testedVariantCount} этапа · {views.toLocaleString('ru-RU')} показов на каждый</small><small>При CPM {cpm.toLocaleString('ru-RU')} ₽ · {autoDeposit ? 'одно подтверждаемое пополнение' : 'без пополнения'}</small></div></div><div className="wizard-final-note"><ShieldIcon /><span>Перед запуском сервис ещё раз проверит доступ токена к «Контенту» и «Продвижению».</span></div></section>;
   const renderStep = () => {
     if (step === 3) return renderParametersStep();
-    if (step === 1) return <section className="wizard-panel wizard-card-step"><div className="wizard-panel-heading"><span className="wizard-number">01</span><div><h3>Выберите карточку</h3><p>Найдите товар, для которого хотите сравнить изображения.</p></div></div><div className="card-search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск по артикулу или названию" autoFocus />{cardLoading && <LoaderCircle className="spin" size={16} />}</div>{cards.length > 0 && <div className="card-search-results wizard-card-results">{cards.slice(0, 8).map((item) => <button type="button" key={item.nm_id} onClick={() => chooseCard(item)}><span>{item.main_photo_url ? <img src={imageUrl(item.main_photo_url)} alt="" /> : <ImagePlus size={18} />}</span><div><strong>{item.title || 'Без названия'}</strong><small>Артикул {item.nm_id} · {item.vendor_code || 'Артикул продавца не указан'}</small></div><ArrowRight size={15} /></button>)}{nextCursor && <button type="button" className="card-load-more" onClick={() => void loadNextCards()} disabled={nextLoading}>{nextLoading ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Показать ещё карточки</button>}</div>}{!cardLoading && cards.length === 0 && <div className="wizard-empty-hint"><span><Search size={16} /></span><div><strong>{hasSearched ? 'Карточка не найдена' : 'Начните с артикула или названия'}</strong><small>{hasSearched ? 'Проверьте nmID и убедитесь, что карточка существует в выбранном магазине Wildberries.' : 'Мы загрузим актуальные данные товара и все изображения из карточки Wildberries.'}</small></div></div>}</section>;
+    if (step === 1) return <section className="wizard-panel wizard-card-step"><div className="wizard-panel-heading"><span className="wizard-number">01</span><div><h3>Выберите карточку</h3><p>Найдите товар, для которого хотите сравнить изображения.</p></div></div><div className="card-search-box"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Поиск по артикулу или названию" autoFocus />{cardLoading && <LoaderCircle className="spin" size={16} />}</div>{catalogError && <div className="ab-error-banner" role="alert"><div><strong>Каталог получен не полностью</strong><span>{catalogError}</span></div><button type="button" className="outline-button" onClick={() => nextCursor ? void loadNextCards() : setCatalogReload((value) => value + 1)}>Повторить</button></div>}{cards.length > 0 && <div className="card-search-results wizard-card-results">{cards.slice(0, visibleCardCount).map((item) => <button type="button" key={item.nm_id} onClick={() => chooseCard(item)}><span>{item.main_photo_url ? <img src={imageUrl(item.main_photo_url)} alt="" /> : <ImagePlus size={18} />}</span><div><strong>{item.title || 'Без названия'}</strong><small>Артикул {item.nm_id} · {item.vendor_code || 'Артикул продавца не указан'}</small></div><ArrowRight size={15} /></button>)}{(visibleCardCount < cards.length || nextCursor) && <button type="button" className="card-load-more" onClick={() => void loadNextCards()} disabled={nextLoading}>{nextLoading ? <LoaderCircle className="spin" size={15} /> : <Plus size={15} />} Показать ещё карточки</button>}</div>}{!cardLoading && !catalogError && cards.length === 0 && <div className="wizard-empty-hint"><span><Search size={16} /></span><div><strong>{hasSearched ? 'Карточка не найдена' : 'В этом магазине нет доступных карточек'}</strong><small>{hasSearched ? 'Проверьте nmID и убедитесь, что карточка существует в выбранном магазине Wildberries.' : 'Мы загрузим актуальные данные товара и все изображения из карточки Wildberries.'}</small></div></div>}</section>;
 
-    if (step === 2) return <><section className="wizard-panel wizard-images-step"><div className="wizard-panel-heading"><span className="wizard-number">02</span><div><h3>Добавьте изображения и опции</h3><p>В каждом слоте выберите фото из карточки или загрузите новый креатив.</p></div><b className="wizard-counter">{testImages.length} вариантов</b></div><div className="wizard-selected-card"><div className="selected-card-image">{card?.main_photo_url && <img src={imageUrl(card.main_photo_url)} alt="" />}</div><div><strong>{card?.title || 'Без названия'}</strong><small>Артикул {card?.nm_id} · {card?.photos.length || 0} фото в карточке</small></div><button type="button" onClick={changeCard}>Изменить</button></div><div className="variant-grid wizard-variant-grid">{files.map((item, index) => <div className={`variant-slot ${item ? 'filled' : ''} ${item?.kind === 'main' ? 'main-slot' : ''}`} key={`${index}-${item?.kind === 'upload' ? item.file.name : item?.kind === 'card' || item?.kind === 'main' ? item.url : 'empty'}`}><div className="variant-slot-head"><span>{item?.kind === 'main' ? 'Главное фото' : `Вариант ${index + 1}`}</span>{files.length > 2 && item?.kind !== 'main' && <button type="button" onClick={() => removeSlot(index)} aria-label="Удалить слот"><Trash2 size={14} /></button>}</div>{item ? <><div className="variant-file-preview"><img src={previews[index] || ''} alt="" />{item.kind !== 'main' && <button type="button" onClick={() => setFiles((current) => current.map((source, position) => position === index ? null : source))} aria-label="Убрать изображение"><X size={14} /></button>}</div><small className="variant-file-name">{item.kind === 'upload' ? item.file.name : item.name}</small><em className={`variant-source-badge ${item.kind === 'main' ? 'control' : ''}`}>{item.kind === 'upload' ? 'Файл' : item.kind === 'main' ? 'Контроль' : 'Карточка'}</em></> : <div className="variant-empty-actions"><button type="button" onClick={() => openPhotoPicker(index)}><ImagePlus size={16} /><span>Из карточки</span></button><label><Upload size={16} /><span>{validatingIndex === index ? 'Проверяем…' : 'С компьютера'}</span><input type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/gif,image/tiff,.tif,.tiff" disabled={validatingIndex === index} onChange={(event) => void setFile(index, event)} /></label></div>}</div>)}{files.length < MAX_TEST_IMAGES && <button type="button" className="variant-add-slot" onClick={() => setFiles((current) => [...current, null])}><Plus size={18} /><span>Добавить слот</span><small>{files.length}/{MAX_TEST_IMAGES}</small></button>}</div><div className="wizard-inline-note"><span>i</span>Выберите от 2 до 5 вариантов. Первое фото карточки добавлено как контрольное и не загружается повторно.</div><div className="wizard-image-options"><div className="wizard-options-heading"><div><strong>Правила эксперимента</strong><small>Настройте, как будет работать тест с главным изображением.</small></div><span>Опции</span></div><div className="wizard-option-list"><label className={skipCurrent ? 'checked' : ''}><input type="checkbox" checked={skipCurrent} onChange={(event) => setSkipCurrentOption(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Не тестировать главное фото</strong><small>Уберём его из первого слота и начнём тест с выбранных вариантов.</small></span><span className="wizard-option-value">Без контроля</span></label><label className={keepWinner ? 'checked' : ''}><input type="checkbox" checked={keepWinner} onChange={(event) => setKeepWinner(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Сделать победившее фото основным</strong><small>После завершения теста победитель автоматически станет главным фото карточки.</small></span></label><label className={autoDeposit ? 'checked' : ''}><input type="checkbox" checked={autoDeposit} onChange={(event) => setAutoDeposit(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Пополнить рекламную кампанию автоматически</strong><small>Если бюджета недостаточно, нужная сумма будет запрошена со счёта Wildberries.</small></span></label><label className={deleteTestMedia ? 'checked' : ''}><input type="checkbox" checked={deleteTestMedia} onChange={(event) => setDeleteTestMedia(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Удалить тестовые файлы после завершения</strong><small>Загруженные изображения будут очищены после окончания эксперимента.</small></span></label></div></div></section>{photoPickerIndex !== null && <div className="photo-picker-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPhotoPickerIndex(null); }}><section className="photo-picker" role="dialog" aria-modal="true" aria-labelledby="photo-picker-title"><header><div><span className="modal-kicker">ФОТО КАРТОЧКИ</span><h3 id="photo-picker-title">Выберите изображение</h3><p>Оно будет добавлено в слот «Вариант {photoPickerIndex + 1}».</p></div><button type="button" className="icon-button" onClick={() => setPhotoPickerIndex(null)} aria-label="Закрыть"><X size={17} /></button></header><div className="photo-picker-grid">{card?.photos.map((url, index) => { const isSelected = selectedCardUrls.has(url) || (skipCurrent && url === card.main_photo_url); return <button type="button" key={`${url}-${index}`} className={isSelected ? 'selected' : ''} disabled={isSelected} onClick={() => addCardPhoto(url, index)}><img src={imageUrl(url) } alt={`Фото ${index + 1}`} /><span>Фото {index + 1}</span>{isSelected && <i><Check size={13} /></i>}</button>; })}</div></section></div>}</>;
+    if (step === 2) return <><section className="wizard-panel wizard-images-step"><div className="wizard-panel-heading"><span className="wizard-number">02</span><div><h3>Добавьте изображения и опции</h3><p>В каждом слоте выберите фото из карточки или загрузите новый креатив.</p></div><b className="wizard-counter">{testImages.length} вариантов</b></div><div className="wizard-selected-card"><div className="selected-card-image">{card?.main_photo_url && <img src={imageUrl(card.main_photo_url)} alt="" />}</div><div><strong>{card?.title || 'Без названия'}</strong><small>Артикул {card?.nm_id} · {card?.photos.length || 0} фото в карточке</small></div><button type="button" onClick={changeCard}>Изменить</button></div><div className="variant-grid wizard-variant-grid">{files.map((item, index) => <div className={`variant-slot ${item ? 'filled' : ''} ${item?.kind === 'main' ? 'main-slot' : ''}`} key={`${index}-${item?.kind === 'upload' ? item.file.name : item?.kind === 'card' || item?.kind === 'main' ? item.url : 'empty'}`}><div className="variant-slot-head"><span>{item?.kind === 'main' ? 'Главное фото' : `Вариант ${index + 1}`}</span>{files.length > 2 && item?.kind !== 'main' && <button type="button" onClick={() => removeSlot(index)} aria-label="Удалить слот"><Trash2 size={14} /></button>}</div>{item ? <><div className="variant-file-preview"><img src={previews[index] || ''} alt="" />{item.kind !== 'main' && <button type="button" onClick={() => setFiles((current) => current.map((source, position) => position === index ? null : source))} aria-label="Убрать изображение"><X size={14} /></button>}</div><small className="variant-file-name">{item.kind === 'upload' ? item.file.name : item.name}</small><em className={`variant-source-badge ${item.kind === 'main' ? 'control' : ''}`}>{item.kind === 'upload' ? 'Файл' : item.kind === 'main' ? 'Контроль' : 'Карточка'}</em></> : <div className="variant-empty-actions"><button type="button" onClick={() => openPhotoPicker(index)}><ImagePlus size={16} /><span>Из карточки</span></button><label><Upload size={16} /><span>{validatingIndex === index ? 'Проверяем…' : 'С компьютера'}</span><input type="file" accept="image/jpeg,image/png,image/webp,image/bmp,image/gif,image/tiff,.tif,.tiff" disabled={validatingIndex === index} onChange={(event) => void setFile(index, event)} /></label></div>}</div>)}{files.length < MAX_TEST_IMAGES && <button type="button" className="variant-add-slot" onClick={() => setFiles((current) => [...current, null])}><Plus size={18} /><span>Добавить слот</span><small>{files.length}/{MAX_TEST_IMAGES}</small></button>}</div><div className="wizard-inline-note"><span>i</span>Выберите от 2 до 5 вариантов. Первое фото карточки добавлено как контрольное и не загружается повторно.</div><div className="wizard-image-options"><div className="wizard-options-heading"><div><strong>Правила эксперимента</strong><small>Настройте, как будет работать тест с главным изображением.</small></div><span>Опции</span></div><div className="wizard-option-list"><label className={skipCurrent ? 'checked' : ''}><input type="checkbox" checked={skipCurrent} onChange={(event) => setSkipCurrentOption(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Не тестировать главное фото</strong><small>Уберём его из первого слота и начнём тест с выбранных вариантов.</small></span><span className="wizard-option-value">Без контроля</span></label><label className={keepWinner ? 'checked' : ''}><input type="checkbox" checked={keepWinner} onChange={(event) => setKeepWinner(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Отметить победившее фото после завершения</strong><small>После завершения сервис отметит победителя только при надёжно подтверждённой статистике.</small></span></label><label className={autoDeposit ? 'checked' : ''}><input type="checkbox" checked={autoDeposit} onChange={(event) => setAutoDeposit(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Разрешить одно пополнение при запуске</strong><small>Сумма и единственный источник будут показаны для отдельного подтверждения.</small></span></label><label className={deleteTestMedia ? 'checked' : ''}><input type="checkbox" checked={deleteTestMedia} onChange={(event) => setDeleteTestMedia(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Удалить тестовые файлы после завершения</strong><small>Очистка разрешена только после закрытия восстановления и срока хранения.</small></span></label></div></div></section>{photoPickerIndex !== null && <div className="photo-picker-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setPhotoPickerIndex(null); }}><section className="photo-picker" role="dialog" aria-modal="true" aria-labelledby="photo-picker-title"><header><div><span className="modal-kicker">ФОТО КАРТОЧКИ</span><h3 id="photo-picker-title">Выберите изображение</h3><p>Оно будет добавлено в слот «Вариант {photoPickerIndex + 1}».</p></div><button type="button" className="icon-button" onClick={() => setPhotoPickerIndex(null)} aria-label="Закрыть"><X size={17} /></button></header><div className="photo-picker-grid">{card?.photos.map((url, index) => { const isSelected = selectedCardUrls.has(url) || (skipCurrent && url === card.main_photo_url); return <button type="button" key={`${url}-${index}`} className={isSelected ? 'selected' : ''} disabled={isSelected} aria-label={`Фото ${index + 1}`} onClick={() => addCardPhoto(url, index)}><img src={imageUrl(url) } alt="" /><span>Фото {index + 1}</span>{isSelected && <i><Check size={13} /></i>}</button>; })}</div></section></div>}</>;
 
-    if (step === 3) return <section className="wizard-panel wizard-options-step"><div className="wizard-panel-heading"><span className="wizard-number">03</span><div><h3>Настройте правила теста</h3><p>Выберите, как сервис должен работать с карточкой и рекламной кампанией.</p></div></div><div className="wizard-option-list"><label className={skipCurrent ? 'checked' : ''}><input type="checkbox" checked={skipCurrent} onChange={(event) => setSkipCurrent(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Не начинать с текущего фото</strong><small>Сервис сразу покажет первый выбранный вариант, не тратя этап на контрольное изображение.</small></span><span className="wizard-option-value">Рекомендуется</span></label><label className={keepWinner ? 'checked' : ''}><input type="checkbox" checked={keepWinner} onChange={(event) => setKeepWinner(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Сделать победившее фото основным</strong><small>После завершения теста победитель автоматически станет главным изображением карточки.</small></span></label><label className={autoDeposit ? 'checked' : ''}><input type="checkbox" checked={autoDeposit} onChange={(event) => setAutoDeposit(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Пополнить рекламную кампанию автоматически</strong><small>Если бюджета будет недостаточно, нужная сумма будет запрошена со счёта Wildberries после подтверждения.</small></span></label><label className={deleteTestMedia ? 'checked' : ''}><input type="checkbox" checked={deleteTestMedia} onChange={(event) => setDeleteTestMedia(event.target.checked)} /><span className="wizard-option-check"><Check size={15} /></span><span className="wizard-option-copy"><strong>Удалить тестовые файлы после завершения</strong><small>Локальные загруженные изображения будут очищены после окончания эксперимента.</small></span></label></div><div className="wizard-summary-card"><div className="wizard-summary-icon"><ImagePlus size={18} /></div><div><strong>{card?.title || 'Выбранная карточка'}</strong><span>Артикул {card?.nm_id} · {selectedImages.length} вариантов изображения</span></div><b>{skipCurrent ? 'Без контроля' : 'С контролем'}</b></div></section>;
-
-    return <section className="wizard-panel wizard-params-step"><div className="wizard-panel-heading"><span className="wizard-number">04</span><div><h3>Параметры и запуск</h3><p>Укажите название теста, объём данных и бюджет продвижения.</p></div></div><div className="wizard-fields"><label className="ab-field wizard-field-wide">Название теста<input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Например, Весенний креатив" required /></label><div className="ab-fields-two"><label className="ab-field">Показы на вариант<input type="number" min={300} max={1000000} value={views} onChange={(event) => setViews(Number(event.target.value))} /><small>Минимум 300 показов</small></label><label className="ab-field">CPM, ₽<input type="number" min={1} value={cpm} onChange={(event) => setCpm(Number(event.target.value))} /><small>Ставка за 1 000 показов</small></label></div><label className="ab-field">Минимальный бюджет кампании, ₽<input type="number" min={1} value={budget} readOnly aria-label="Минимальный бюджет рассчитан автоматически" /><small>CPM × показы × этапы; минимум 1 200 ₽, округление вверх до 100 ₽</small></label><div className="wizard-unified-note"><span>Тип ставки</span><strong>Единая ставка · поиск и рекомендации</strong></div></div><div className="wizard-budget-card"><div><span>Расчёт запуска</span><strong>{requiredBudget.toLocaleString('ru-RU')} ₽</strong></div><div><small>{testedVariantCount} этапа · {views.toLocaleString('ru-RU')} показов на каждый</small><small>При CPM {cpm.toLocaleString('ru-RU')} ₽ · {autoDeposit ? 'автопополнение включено' : 'автопополнение отключено'}</small></div></div><div className="wizard-final-note"><ShieldIcon /><span>Перед запуском сервис ещё раз проверит доступ токена к «Контенту» и «Продвижению».</span></div></section>;
+    return null;
   };
 
   if (startConfirmation) {
@@ -584,10 +638,13 @@ function StartConfirmationModal({
       <p>Перед созданием кампании проверьте ставку и рассчитанный бюджет. После подтверждения сервис выполнит запуск в Wildberries.</p>
       <div className="ab-confirm-summary">
         <div><small>CPM</small><strong>{formatRub(confirmation.cpm)}</strong><span>за 1 000 показов</span></div>
-        <div><small>Необходимый бюджет</small><strong>{formatRub(confirmation.requiredBudget)}</strong><span>{confirmation.testedVariantCount} этапа теста</span></div>
+        <div><small>Подтверждаемый предел</small><strong>{formatRub(confirmation.requiredBudget)}</strong><span>{confirmation.testedVariantCount} этапа теста</span></div>
       </div>
+      <p>Магазин: {confirmation.storeName} · Товар: {confirmation.nmId} · Показов на фото: {formatNumber(confirmation.views)}</p>
+      <div className="ab-confirm-photos">{confirmation.photos.map((photo, index) => <img key={index} src={photo} alt={`Подтверждаемое фото ${index + 1}`} />)}</div>
+      <p>Прогноз расхода: {formatRub(confirmation.forecast)}. Резерв: {formatRub(confirmation.reserve)}, входит в предел {formatRub(confirmation.requiredBudget)}. Минимум WB и округление уже учтены. Задержки WB не позволяют обещать отсутствие перерасхода.</p>
       <div className="ab-confirm-source"><Wallet size={16} /><div><strong>Источник пополнения</strong><span>{confirmation.autoDeposit ? confirmation.sourceLabel : 'Пополнение вручную в кабинете WB'}</span></div><CheckCircle2 size={17} /></div>
-      <div className="ab-confirm-note"><CircleAlert size={16} /><span>{confirmation.autoDeposit ? `Если средств в кампании будет недостаточно, Wildberries пополнит её на недостающую сумму через API. Новая кампания не создаётся повторно.` : 'Кампания должна быть пополнена вручную перед запуском. Автоматическое списание отключено.'}</span></div>
+      <div className="ab-confirm-note"><CircleAlert size={16} /><span>{confirmation.autoDeposit ? `Разрешается одно пополнение новой кампании на ${formatRub(confirmation.requiredBudget)} из выбранного источника. Пополнение не равно расходу; повторные пополнения и смешивание источников не разрешены.` : 'Кампания должна быть пополнена вручную перед запуском. Автоматическое списание отключено.'}</span></div>
       <div className="ab-confirm-actions"><button type="button" className="outline-button" onClick={onClose} disabled={busy}>Отмена</button><button type="button" className="primary-button" onClick={onConfirm} disabled={busy}>{busy ? <><LoaderCircle className="spin" size={16} /> Запускаем…</> : <><Play size={16} /> {confirmation.autoDeposit ? 'Разрешить и запустить' : 'Подтвердить запуск'}</>}</button></div>
     </section>
   </div>;
@@ -615,7 +672,8 @@ function MinimumCpmModal({
         <div><small>Новый CPM</small><strong>{formatRub(confirmation.minimumCpm)}</strong><span>минимально допустимая ставка</span></div>
         <div><small>Новый бюджет</small><strong>{formatRub(confirmation.recalculatedBudget)}</strong><span>рассчитан с учётом этапов</span></div>
       </div>
-      <div className="ab-confirm-note"><CircleAlert size={16} /><span>Сервис обновил параметры черновика. Повторный запуск использует уже созданный тест и не создаёт дубликат.</span></div>
+      <p>Магазин: {confirmation.snapshot.store_name} · Товар: {confirmation.snapshot.nm_id} · Серия: #{confirmation.testId}. Источник: {confirmation.autoDeposit ? confirmation.sourceLabel : 'без пополнения'}. Предел: {formatRub(confirmation.recalculatedBudget)}. Резерв входит в предел.</p>
+      <div className="ab-confirm-note"><CircleAlert size={16} /><span>Сервис обновил параметры черновика. Повторный запуск использует именно показанную конфигурацию. При новом изменении потребуется новое подтверждение.</span></div>
       <div className="ab-confirm-actions"><button type="button" className="outline-button" onClick={onClose} disabled={busy}>Открыть черновик</button><button type="button" className="primary-button" onClick={onConfirm} disabled={busy}>{busy ? <><LoaderCircle className="spin" size={16} /> Запускаем…</> : <><RefreshCw size={16} /> Пересчитать и повторить</>}</button></div>
     </section>
   </div>;

@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     email_from: str = "noreply@wb-optimizer.local"
 
     wb_content_api_url: str = "https://content-api.wildberries.ru"
+    wb_common_api_url: str = "https://common-api.wildberries.ru"
     wb_advert_api_url: str = "https://advert-api.wildberries.ru"
     wb_analytics_api_url: str = "https://seller-analytics-api.wildberries.ru"
     wb_statistics_api_url: str = "https://statistics-api.wildberries.ru"
@@ -39,6 +40,12 @@ class Settings(BaseSettings):
     media_url_expire_sec: int = 3600
     ab_test_scheduler_interval_sec: int = 60
     ab_test_no_progress_timeout_sec: int = 172800
+    ab_test_stats_settle_attempts: int = 3
+    ab_test_stats_settle_delay_sec: int = 10
+    ab_test_budget_guard_reserve_rub: int = 300
+    ab_test_scheduler_per_test_timeout_sec: int = 90
+    ab_test_scheduler_concurrency: int = 4
+    ab_test_max_budget_rub: int = 1_000_000_000
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -59,6 +66,11 @@ class Settings(BaseSettings):
             raise ValueError("FERNET_KEY must be configured in production")
         if self.app_env == "production" and not self.media_signing_secret.strip():
             raise ValueError("MEDIA_SIGNING_SECRET must be configured in production")
+        if self.app_env == "production":
+            for name in ("wb_content_api_url", "wb_common_api_url", "wb_advert_api_url", "wb_analytics_api_url", "wb_statistics_api_url"):
+                value = str(getattr(self, name)).lower()
+                if any(host in value for host in ("localhost", "127.0.0.1", "0.0.0.0", "::1")):
+                    raise ValueError(f"{name} must point to a non-loopback provider in production")
         return self
 
 

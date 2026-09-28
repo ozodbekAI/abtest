@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 import asyncio
 import hashlib
+import json
 import logging
+import math
 import time
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 
 from app.core.config import settings
-from app.services.wb_content_client import WBApiError, _json_or_text
+from app.services.wb_content_client import WBApiError, _json_or_text, _redact_token, _retry_after_seconds
 
 
 logger = logging.getLogger(__name__)
@@ -67,6 +71,9 @@ class WBPromotionClient:
         return None
 
     async def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        if path in {"/adv/v2/seacat/save-ad", "/api/advert/v1/bids", "/adv/v1/budget/deposit", "/adv/v0/start", "/adv/v0/pause", "/adv/v0/stop", "/adv/v0/delete"}:
+            from app.services.wb_rate_limiter import WBRateLimiter
+            await WBRateLimiter.assert_lock_owned()
         timeout = max(settings.wb_request_timeout, 30.0)
         started = time.perf_counter()
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -78,26 +85,16 @@ class WBPromotionClient:
             response.status_code,
             int((time.perf_counter() - started) * 1000),
         )
-        payload = _json_or_text(response)
+        payload = _redact_token(_json_or_text(response), self.token)
         if not 200 <= response.status_code < 300:
             message = self._error_message(payload)
             logger.warning(
-                "WB Promotion error path=%s status=%s message=%s payload=%s",
+                "WB Promotion error path=%s status=%s message=%s",
                 path,
                 response.status_code,
                 message,
-                payload,
             )
-            retry_after = None
-            if response.status_code == 429:
-                try:
-                    retry_after = float(
-                        response.headers.get("X-Ratelimit-Retry")
-                        or response.headers.get("Retry-After")
-                        or "0"
-                    )
-                except ValueError:
-                    retry_after = None
+            retry_after = _retry_after_seconds(response) if response.status_code == 429 else None
             raise WBApiError(
                 f"WB Продвижение: {message or response.reason_phrase}",
                 status_code=response.status_code,
@@ -237,11 +234,26 @@ class WBPromotionClient:
                 if returned_bid_type not in {api_placement.lower(), "combined"}:
                     continue
                 try:
-                    value = float(bid.get("value"))
-                except (TypeError, ValueError) as exc:
+                    value = Decimal(str(bid.get("value")))
+                    if not value.is_finite() or value <= 0:
+                        raise ValueError("invalid minimum bid")
+                except (TypeError, ValueError, InvalidOperation) as exc:
                     raise WBApiError(
                         "Wildberries вернул минимальную ставку в неподдерживаемом формате; запуск заблокирован"
                     ) from exc
+                currency = str(
+                    bid.get("currency")
+                    or bid.get("currency_code")
+                    or row.get("currency")
+                    or row.get("currencyCode")
+                    or (payload.get("currency") if isinstance(payload, dict) else None)
+                    or (payload.get("currencyCode") if isinstance(payload, dict) else None)
+                    or "RUB"
+                ).strip().upper()
+                if currency not in {"RUB", "RUR", "₽"}:
+                    raise WBApiError(
+                        f"Wildberries вернул минимальную ставку в валюте {currency}; запуск заблокирован"
+                    )
                 unit = str(bid.get("unit") or bid.get("units") or bid.get("value_unit") or "").strip().lower()
                 if unit:
                     kopeck_units = {"kopeck", "kopecks", "kop", "коп", "копейка", "копейки", "копеек"}
@@ -259,19 +271,33 @@ class WBPromotionClient:
                     # explicit unit is present.
                     value /= 100
                 if value > 0:
-                    return int(value + 0.999999)
+                    return int(value.to_integral_value(rounding=ROUND_CEILING))
         return None
 
     async def get_balance(self) -> Any:
         return await self._request("GET", "/adv/v1/balance")
 
+    async def is_card_advertisable(self, nm_id: int, *, subject_id: int | None = None) -> bool:
+        """Read WB's list of cards available for campaigns before creation."""
+        payload = await self._request("POST", "/adv/v2/supplier/nms", json=[int(subject_id)] if subject_id else [])
+        if not isinstance(payload, list) or any(not isinstance(item, dict) for item in payload):
+            raise WBApiError("WB не вернул список доступных для рекламы карточек")
+        for item in payload:
+            try:
+                if int(item.get("nm") or item.get("nmID") or item.get("nm_id") or 0) == int(nm_id):
+                    return True
+            except (TypeError, ValueError):
+                raise WBApiError("WB вернул некорректный идентификатор рекламируемого товара")
+        return False
+
     @staticmethod
     def _amount(value: Any) -> float:
-        if isinstance(value, (int, float)):
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             return max(float(value), 0.0)
         if isinstance(value, str):
             try:
-                return max(float(value.replace(",", ".")), 0.0)
+                parsed = float(value.replace(",", "."))
+                return max(parsed, 0.0) if math.isfinite(parsed) else 0.0
             except ValueError:
                 return 0.0
         return 0.0
@@ -318,11 +344,13 @@ class WBPromotionClient:
             if isinstance(node, dict):
                 for key in ("total", "totalBudget", "total_budget", "balance"):
                     value = node.get(key)
-                    if isinstance(value, (int, float)):
+                    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0:
                         return max(float(value), 0.0)
                     if isinstance(value, str):
                         try:
-                            return max(float(value.replace(",", ".")), 0.0)
+                            amount = float(value.replace(",", "."))
+                            if math.isfinite(amount) and amount >= 0:
+                                return amount
                         except ValueError:
                             pass
                 for value in node.values():
@@ -520,6 +548,18 @@ class WBPromotionClient:
                 return int(campaign.get("status", 0))
         return None
 
+    async def find_campaigns_for_nm(self, nm_id: int, *, refresh: bool = True) -> list[dict[str, Any]]:
+        """Discover external campaigns containing a card before creating one."""
+        matches: list[dict[str, Any]] = []
+        for campaign in await self.list_campaigns(refresh=refresh):
+            campaign_id = int(campaign.get("id") or 0)
+            if not campaign_id:
+                continue
+            details = await self.get_campaign_details(campaign_id)
+            if int(nm_id) in self.campaign_nm_ids(details):
+                matches.append({"id": campaign_id, "status": int(campaign.get("status") or 0), "details": details or {}})
+        return matches
+
     async def get_campaign_details(self, campaign_id: int) -> dict[str, Any] | None:
         """Return one campaign from WB's current campaign details endpoint.
 
@@ -577,17 +617,18 @@ class WBPromotionClient:
         *,
         started_at: date | None = None,
         end_at: date | None = None,
+        refresh: bool = False,
     ) -> dict[str, Any]:
         campaign_ids = [int(campaign_id)] if isinstance(campaign_id, int) else [int(value) for value in campaign_id]
         campaign_ids = list(dict.fromkeys(campaign_ids))
         if not campaign_ids or len(campaign_ids) > 50:
             raise WBApiError("WB fullstats принимает от 1 до 50 кампаний за один запрос")
-        end = end_at or date.today()
+        end = end_at or datetime.now(ZoneInfo("Europe/Moscow")).date()
         begin = started_at or (end - timedelta(days=30))
         if begin > end:
             raise WBApiError("Начальная дата статистики не может быть позже конечной даты")
         if (end - begin).days > 30:
-            begin = end - timedelta(days=30)
+            raise WBApiError("Период fullstats не должен превышать 31 календарный день; запрос разбивается вызывающим сервисом")
         token_key = hashlib.sha256(self.token.encode()).hexdigest()
         stats_lock = self.__class__._stats_locks.setdefault(token_key, asyncio.Lock())
         cache_key = (
@@ -601,7 +642,7 @@ class WBPromotionClient:
             try:
                 async with stats_lock:
                     cached = self.__class__._stats_cache.get(cache_key)
-                    if cached and time.monotonic() - cached[0] <= self.__class__._stats_cache_ttl:
+                    if not refresh and cached and time.monotonic() - cached[0] <= self.__class__._stats_cache_ttl:
                         return dict(cached[1])
                     wait_for = 20.2 - (
                         time.monotonic() - self.__class__._last_stats_at.get(token_key, 0.0)
@@ -637,28 +678,67 @@ class WBPromotionClient:
             rows = payload.get("data") or payload.get("items") or ([payload] if "days" in payload or "advertId" in payload else [])
         else:
             rows = []
-        row_dicts = [item for item in rows if isinstance(item, dict)]
+        if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+            raise WBApiError("WB fullstats вернул некорректный список наблюдений")
+        row_dicts = [self._normalize_stats_node(item) for item in rows]
+        if any(self._campaign_id(item) is None for item in row_dicts):
+            raise WBApiError("WB fullstats не указал кампанию; статистика не может быть отнесена к тесту")
         identified_rows = [item for item in row_dicts if self._campaign_id(item) is not None]
         if identified_rows:
             requested_ids = set(campaign_ids)
             row_dicts = [item for item in row_dicts if self._campaign_id(item) in requested_ids]
-        valid_rows = [item for item in row_dicts if self._has_any_metric(item)]
+        # WB can return the same campaign/day/placement row more than once.
+        # A repeated observation must never become extra spend or impressions.
+        # Keep genuinely different periods/placements distinct by including
+        # their date and placement dimensions in the fingerprint.
+        deduped_rows: list[dict[str, Any]] = []
+        seen_rows: dict[tuple[int | None, tuple[tuple[str, str], ...]], str] = {}
+        for item in row_dicts:
+            if not self._has_any_metric(item):
+                continue
+            campaign = self._campaign_id(item)
+            fingerprint = json.dumps(item, sort_keys=True, ensure_ascii=False, default=str)
+            # The same campaign legitimately has several daily/placement
+            # rows. Only an identical observation is a duplicate; using the
+            # campaign ID alone incorrectly rejects normal multi-day fullstats
+            # responses and either freezes or over-counts the test.
+            dimension_keys = (
+                "date", "day", "appType", "app_type", "nmId", "nmID", "nm_id",
+                "placement", "placement_type", "type", "period",
+                "variantPosition", "variant_position", "photoPosition", "photo_position",
+                "abVariant", "ab_variant", "abTestVariant", "ab_test_variant",
+            )
+            dimensions = tuple(sorted((key, str(item[key])) for key in dimension_keys if key in item))
+            row_key = (campaign, dimensions)
+            if row_key in seen_rows:
+                if seen_rows[row_key] != fingerprint:
+                    raise WBApiError("WB fullstats вернул противоречивые строки одной кампании; статистика не принята")
+                continue
+            seen_rows[row_key] = fingerprint
+            deduped_rows.append(item)
+        valid_rows = deduped_rows
         if not valid_rows and not row_dicts and isinstance(payload, dict) and self._has_any_metric(payload):
             valid_rows = [payload]
         available_metrics = {
-            "views": any(self._has_metric(row, "views", aliases=("shows", "impressions")) for row in valid_rows),
-            "clicks": any(self._has_metric(row, "clicks") for row in valid_rows),
-            "orders": any(self._has_metric(row, "orders") for row in valid_rows),
-            "sum": any(self._has_metric(row, "sum", aliases=("sum_price", "spend", "cost")) for row in valid_rows),
+            "views": bool(valid_rows) and all(self._has_metric(row, "views", aliases=("shows", "impressions")) for row in valid_rows),
+            "clicks": bool(valid_rows) and all(self._has_metric(row, "clicks") for row in valid_rows),
+            "orders": bool(valid_rows) and all(self._has_metric(row, "orders") for row in valid_rows),
+            "sum": bool(valid_rows) and all(self._has_metric(row, "sum", aliases=("spend", "cost")) for row in valid_rows),
         }
         totals = {
             "views": sum(self._metric_total(row, "views", aliases=("shows", "impressions")) for row in valid_rows),
             "clicks": sum(self._metric_total(row, "clicks") for row in valid_rows),
             "orders": sum(self._metric_total(row, "orders") for row in valid_rows),
-            "sum": sum(self._metric_total(row, "sum", aliases=("sum_price", "spend", "cost")) for row in valid_rows),
+            "sum": sum(self._metric_total(row, "sum", aliases=("spend", "cost")) for row in valid_rows),
             "_has_data": bool(valid_rows),
             "_available_metrics": available_metrics,
+            "_data_complete": {campaign for campaign, _ in seen_rows} == set(campaign_ids) and all(available_metrics[key] for key in ("views", "clicks", "sum")),
+            "_observed_at": datetime.now(timezone.utc).isoformat(),
         }
+        variant_totals = self._extract_variant_totals(valid_rows)
+        totals["_variant_attribution_complete"] = variant_totals is not None
+        if variant_totals is not None:
+            totals["_variant_totals"] = variant_totals
         if len(self.__class__._stats_cache) >= 256:
             self.__class__._stats_cache.pop(next(iter(self.__class__._stats_cache)))
         self.__class__._stats_cache[cache_key] = (time.monotonic(), totals)
@@ -676,12 +756,12 @@ class WBPromotionClient:
         campaign_ids = list(dict.fromkeys(campaign_ids))
         if not campaign_ids or len(campaign_ids) > 50:
             return None
-        end = end_at or date.today()
+        end = end_at or datetime.now(ZoneInfo("Europe/Moscow")).date()
         begin = started_at or (end - timedelta(days=30))
         if begin > end:
             return None
         if (end - begin).days > 30:
-            begin = end - timedelta(days=30)
+            return None
         cache_key = (
             hashlib.sha256(self.token.encode()).hexdigest(),
             tuple(campaign_ids),
@@ -692,6 +772,103 @@ class WBPromotionClient:
         if cached and time.monotonic() - cached[0] <= self.__class__._stats_cache_ttl:
             return dict(cached[1])
         return None
+
+    @classmethod
+    def _normalize_stats_node(cls, node: dict[str, Any]) -> dict[str, Any]:
+        """Reject malformed counters; de-duplicate each documented dimension."""
+        result = dict(node)
+        for metric in ("views", "shows", "impressions", "clicks", "orders", "sum", "sum_price", "spend", "cost"):
+            if metric in node:
+                value = node[metric]
+                try:
+                    number = float(str(value).replace(",", "."))
+                except (TypeError, ValueError) as exc:
+                    raise WBApiError(f"WB fullstats: некорректная метрика {metric}") from exc
+                if isinstance(value, bool) or not math.isfinite(number) or number < 0:
+                    raise WBApiError(f"WB fullstats: некорректная метрика {metric}")
+                if metric in {"views", "shows", "impressions", "clicks", "orders"} and not number.is_integer():
+                    raise WBApiError(f"WB fullstats: счётчик {metric} должен быть целым")
+        dimensions = {"days": ("date", "day"), "dates": ("date", "day"), "apps": ("appType", "app_type"), "nm": ("nmId", "nmID", "nm_id"), "nms": ("nmId", "nmID", "nm_id")}
+        for container, keys in dimensions.items():
+            if container not in node:
+                continue
+            children = node[container]
+            if not isinstance(children, list) or any(not isinstance(child, dict) for child in children):
+                raise WBApiError(f"WB fullstats: некорректное измерение {container}")
+            normalized = []
+            seen = {}
+            for child in children:
+                child = cls._normalize_stats_node(child)
+                identity = next((child[key] for key in keys if key in child), None)
+                encoded = json.dumps(child, sort_keys=True, default=str)
+                marker = str(identity) if identity is not None else encoded
+                if marker in seen:
+                    if seen[marker] != encoded:
+                        raise WBApiError(f"WB fullstats: противоречивые строки {container}")
+                    continue
+                seen[marker] = encoded
+                normalized.append(child)
+            result[container] = normalized
+        for key in ("stat", "stats", "result", "data"):
+            if isinstance(node.get(key), dict):
+                result[key] = cls._normalize_stats_node(node[key])
+            elif isinstance(node.get(key), list):
+                result[key] = [cls._normalize_stats_node(item) for item in node[key] if isinstance(item, dict)]
+        return result
+
+    @staticmethod
+    def _variant_position(node: dict[str, Any]) -> int | None:
+        """Read an explicit photo/stage attribution supplied by the provider."""
+        for key in (
+            "variantPosition", "variant_position", "photoPosition", "photo_position",
+            "abVariant", "ab_variant", "abTestVariant", "ab_test_variant",
+        ):
+            raw = node.get(key)
+            if isinstance(raw, bool):
+                continue
+            try:
+                position = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 <= position <= 5:
+                return position
+        return None
+
+    @classmethod
+    def _extract_variant_totals(cls, rows: list[dict[str, Any]]) -> dict[str, dict[str, float]] | None:
+        """Return totals only when every metric row has explicit attribution.
+
+        Campaign-level fullstats normally has no photo identity.  A provider
+        adapter may add one of the explicit keys above; mixed attributed and
+        unattributed rows are rejected so they can never produce a false CTR.
+        """
+        found: dict[str, dict[str, float]] = {}
+        saw_metric = False
+
+        def walk(node: object) -> bool:
+            nonlocal saw_metric
+            if isinstance(node, list):
+                return all(walk(item) for item in node if isinstance(item, (dict, list)))
+            if not isinstance(node, dict):
+                return True
+            has_metric = any(key in node for key in ("views", "shows", "impressions", "clicks", "sum", "spend", "cost"))
+            if not has_metric:
+                children = [value for key, value in node.items() if key in {"days", "dates", "apps", "nms", "nm", "data", "items"}]
+                return all(walk(child) for child in children)
+            saw_metric = True
+            position = cls._variant_position(node)
+            if position is None:
+                return False
+            entry = found.setdefault(str(position), {"views": 0.0, "clicks": 0.0, "orders": 0.0, "sum": 0.0})
+            entry["views"] += cls._metric_total(node, "views", aliases=("shows", "impressions"))
+            entry["clicks"] += cls._metric_total(node, "clicks")
+            entry["orders"] += cls._metric_total(node, "orders")
+            entry["sum"] += cls._metric_total(node, "sum", aliases=("spend", "cost"))
+            return True
+
+        if not walk(rows) or not saw_metric or not found:
+            return None
+        return {position: {key: round(value, 2) for key, value in values.items()} for position, values in found.items()}
 
     @classmethod
     def _metric_total(cls, node: Any, key: str, aliases: tuple[str, ...] = ()) -> float:
@@ -740,7 +917,7 @@ class WBPromotionClient:
                     pass
         for container_key in ("days", "dates", "apps", "nm", "nms"):
             children = node.get(container_key)
-            if isinstance(children, list) and any(cls._has_metric(child, key, aliases) for child in children):
+            if isinstance(children, list) and children and all(cls._has_metric(child, key, aliases) for child in children):
                 return True
         nested = node.get("stat") or node.get("stats") or node.get("result") or node.get("data")
         if isinstance(nested, dict):
@@ -757,7 +934,7 @@ class WBPromotionClient:
                 ("views", ("shows", "impressions")),
                 ("clicks", ()),
                 ("orders", ()),
-                ("sum", ("sum_price", "spend", "cost")),
+                ("sum", ("spend", "cost")),
             )
         )
 

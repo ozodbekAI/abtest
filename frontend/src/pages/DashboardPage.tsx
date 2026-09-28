@@ -12,7 +12,7 @@ const PERIODS = [['today', 'Сегодня'], ['week', '7 дней'], ['month', 
 function formatNumber(value: number) { return new Intl.NumberFormat('ru-RU').format(Math.round(value || 0)); }
 function formatRub(value: number) { return `${new Intl.NumberFormat('ru-RU').format(Math.round(value || 0))} ₽`; }
 function formatCompactRub(value: number | null) { return value == null ? '—' : formatRub(value); }
-function formatPercent(value: number) { return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(value || 0)}%`; }
+function formatPercent(value: number | null) { if (value == null) return '—'; return `${new Intl.NumberFormat('ru-RU', { maximumFractionDigits: 2 }).format(value || 0)}%`; }
 function periodLabel(period: string) { return period === 'today' ? 'сегодня' : period === 'week' ? '7 дней' : period === 'month' ? '30 дней' : 'выбранный период'; }
 
 export function DashboardPage() {

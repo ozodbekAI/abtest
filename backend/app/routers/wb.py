@@ -7,7 +7,7 @@ from app.controllers.wb_controller import WBController
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.user import User
-from app.schemas.wb import WBConnectionCreateRequest, WBConnectionResponse, WBPromotionBalanceResponse, WBTokenRequest
+from app.schemas.wb import WBConnectionCreateRequest, WBConnectionResponse, WBPromotionBalanceResponse, WBTokenRequest, WBConnectionRotateTokenRequest
 from app.schemas.dashboard import DashboardStatsResponse
 
 
@@ -45,7 +45,7 @@ async def promotion_balance(
 
 @router.get("/token", response_model=WBConnectionResponse)
 async def get_wb_token(
-    connection_id: int | None = None,
+    connection_id: int = Query(gt=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -91,7 +91,7 @@ async def connect_wb_token(
 
 @router.post("/token/validate", response_model=WBConnectionResponse)
 async def validate_wb_token(
-    connection_id: int | None = None,
+    connection_id: int = Query(gt=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -109,7 +109,7 @@ async def validate_wb_connection(
 
 @router.delete("/token", status_code=status.HTTP_204_NO_CONTENT)
 async def disconnect_wb_token(
-    connection_id: int | None = None,
+    connection_id: int = Query(gt=0),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -123,3 +123,13 @@ async def disconnect_wb_connection(
     db: AsyncSession = Depends(get_db),
 ):
     await controller.disconnect(db, current_user.id, connection_id)
+
+
+@router.patch("/connections/{connection_id}/token", response_model=WBConnectionResponse)
+async def rotate_wb_connection_token(
+    connection_id: int,
+    request: WBConnectionRotateTokenRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await controller.rotate_token(db, current_user.id, connection_id, request.token)
