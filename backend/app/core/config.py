@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     ab_test_stats_settle_attempts: int = 3
     ab_test_stats_settle_delay_sec: int = 10
     ab_test_budget_guard_reserve_rub: int = 300
-    ab_test_scheduler_per_test_timeout_sec: int = 90
+    ab_test_scheduler_per_test_timeout_sec: int = 1500
     ab_test_scheduler_concurrency: int = 4
     ab_test_max_budget_rub: int = 1_000_000_000
 

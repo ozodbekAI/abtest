@@ -65,13 +65,6 @@ class ABTestService:
     IMAGE_REUPLOAD_DELAY_SECONDS = 3600
 
     IMAGE_PHASH_THRESHOLD = 10
-    # FIX-4. Below this pHash distance two different files cannot be told apart
-    # after WB re-encodes them, so "installed" could never be verified (exact
-    # duplicate / re-compressed copy of one photo). Between this value and
-    # IMAGE_PHASH_THRESHOLD the frames are merely SIMILAR (other pose, slightly
-    # different crop): allowed, verification then compares against the image
-    # that was in the slot before.
-    IMAGE_MIN_DISTINGUISHABLE_DISTANCE = 4
 
     IMAGE_VERIFY_MAX_REUPLOADS = 1
     # A/B experiments are intentionally limited to 2–5 tested images.  The
@@ -181,25 +174,6 @@ class ABTestService:
 
         return distance <= threshold, distance
 
-
-    @classmethod
-    def _image_relation(cls, data1: bytes, data2: bytes) -> tuple[str, int | None]:
-        """Classify two images: identical | indistinguishable | similar | distinct.
-
-        Only identical/indistinguishable are technical blockers. "similar" is a
-        policy warning and never forbids an experiment by itself.
-        """
-        if data1 == data2:
-            return "identical", 0
-        try:
-            distance = cls._image_hash_distance(cls._perceptual_hash(data1), cls._perceptual_hash(data2))
-        except (ValueError, OSError):
-            return "distinct", None
-        if distance < cls.IMAGE_MIN_DISTINGUISHABLE_DISTANCE:
-            return "indistinguishable", distance
-        if distance <= cls.IMAGE_PHASH_THRESHOLD:
-            return "similar", distance
-        return "distinct", distance
 
     @staticmethod
     def _required_budget_for_test(test: ABTest) -> int:
@@ -1014,8 +988,7 @@ class ABTestService:
                 detail={
                     "code": "card_test_already_open",
                     "message": "Для этой карточки уже существует незавершённый A/B-тест в этом WB-магазине.",
-                    # FIX-6: the id is shown only to the owner of that test.
-                    **({"test_id": existing_open.id} if existing_open.user_id == user_id else {}),
+                    "test_id": existing_open.id,
                 },
             )
         test = await self.repository.create(
@@ -1253,23 +1226,13 @@ class ABTestService:
                 # same creative must be rejected before the paid run starts.
                 try:
                     existing_data = (self._media_root() / existing.file_path).read_bytes()
-                    relation, distance = self._image_relation(existing_data, data)
-                except OSError:
-                    relation, distance = "distinct", None
-                if relation in {"identical", "indistinguishable"}:
+                    similar, distance = self._images_similar(existing_data, data)
+                except (OSError, ValueError):
+                    similar, distance = False, None
+                if similar:
                     raise HTTPException(
                         status_code=409,
-                        detail=(
-                            f"Вариант практически не отличается от фото {existing.position} "
-                            f"(копия или пережатие одного кадра; pHash distance={distance}). "
-                            "Такие варианты нельзя выдавать за разные."
-                        ),
-                    )
-                if relation == "similar":
-                    # Warning only: the user decides. Recorded for the audit trail.
-                    logger.warning(
-                        "A/B similar variants accepted test_id=%s position=%s other=%s phash_distance=%s",
-                        test.id, position, existing.position, distance,
+                        detail=f"Вариант слишком похож на фото {existing.position}; выберите другое изображение (pHash distance={distance})",
                     )
             if old and old.file_path:
                 (self._media_root() / old.file_path).unlink(missing_ok=True)
@@ -1741,14 +1704,9 @@ class ABTestService:
         attempts: int = 5,
         delay_seconds: int = 10,
         threshold: int = 10,
-        previous_data: bytes | None = None,
     ) -> bool:
         """
         Verify that WB CDN serves the exact image uploaded to the slot.
-
-        FIX-4: when the image previously in the slot is known and distinguishable
-        from the new one, the CDN image must be closer to the NEW image than to
-        the OLD one; otherwise a similar-looking old image would be "confirmed".
 
         Flow:
             upload
@@ -1760,14 +1718,6 @@ class ABTestService:
         """
 
         expected_hash = self._perceptual_hash(expected_data)
-        previous_hash = None
-        if previous_data:
-            try:
-                candidate_previous = self._perceptual_hash(previous_data)
-                if (expected_hash - candidate_previous) >= self.IMAGE_MIN_DISTINGUISHABLE_DISTANCE:
-                    previous_hash = candidate_previous
-            except Exception:
-                previous_hash = None
 
         logger.info(
             "WB VERIFY EXPECTED "
@@ -1910,18 +1860,7 @@ class ABTestService:
                                 cdn_content_type,
                             )
 
-                            still_old = (
-                                previous_hash is not None
-                                and (actual_hash - previous_hash) <= distance
-                            )
-                            if still_old:
-                                logger.warning(
-                                    "WB VERIFY STILL OLD IMAGE "
-                                    "test_id=%s nm_id=%s slot=%s attempt=%s",
-                                    test.id, test.nm_id, slot, attempt,
-                                )
-
-                            if distance <= threshold and not still_old:
+                            if distance <= threshold:
                                 logger.info(
                                     "WB VERIFY SUCCESS "
                                     "test_id=%s nm_id=%s slot=%s "
@@ -2361,10 +2300,11 @@ class ABTestService:
         # OLD vs NEW safety check.
         # ---------------------------------------------------------
         if variant.source_type != "control":
-            relation, distance = self._image_relation(current_main, data)
-            # "similar" frames are a user decision; only frames that WB
-            # verification cannot tell apart are blocked.
-            similar = relation in {"identical", "indistinguishable"}
+            similar, distance = self._images_similar(
+                current_main,
+                data,
+                threshold=self.IMAGE_PHASH_THRESHOLD,
+            )
 
             logger.info(
                 "A/B OLD NEW IMAGE CHECK "
@@ -2516,11 +2456,6 @@ class ABTestService:
             # image'ni bermasligi mumkin.
             await asyncio.sleep(30)
 
-            try:
-                previous_slot_data = self._read_state_slot(state, slot)[0]
-            except Exception:
-                previous_slot_data = None
-
             verified = await self._verify_uploaded_image(
                 test=test,
                 slot=slot,
@@ -2529,7 +2464,6 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
-                previous_data=previous_slot_data,
             )
 
             if not verified:
@@ -3221,7 +3155,7 @@ class ABTestService:
                     connection.token_fingerprint, test.nm_id, exclude_test_id=test.id
                 )
                 if unresolved_test:
-                    raise HTTPException(status_code=409, detail={"code": "card_test_already_open", "message": "Для этой карточки уже есть незавершённый A/B-тест в этом WB-магазине.", **({"test_id": unresolved_test.id} if unresolved_test.user_id == test.user_id else {})})
+                    raise HTTPException(status_code=409, detail={"code": "card_test_already_open", "message": "Для этой карточки уже есть незавершённый A/B-тест в этом WB-магазине.", "test_id": unresolved_test.id})
 
             content, promotion = await self._clients(connection)
 
@@ -3389,19 +3323,14 @@ class ABTestService:
                     for remote_data in remote_images:
                         if hashlib.sha256(remote_data).hexdigest() == local_sha:
                             raise HTTPException(status_code=409, detail=f"Вариант {candidate.position} совпадает с уже существующим фото карточки WB")
-                        relation, distance = self._image_relation(local_data, remote_data)
-                        if relation == "indistinguishable":
+                        try:
+                            similar, distance = self._images_similar(local_data, remote_data)
+                        except (ValueError, OSError):
+                            similar, distance = False, None
+                        if similar:
                             raise HTTPException(
                                 status_code=409,
-                                detail=(
-                                    f"Вариант {candidate.position} практически не отличается от фото карточки WB "
-                                    f"(пережатая копия; pHash distance={distance}). Выберите другой кадр."
-                                ),
-                            )
-                        if relation == "similar":
-                            logger.warning(
-                                "A/B similar-to-card variant accepted test_id=%s position=%s phash_distance=%s",
-                                test.id, candidate.position, distance,
+                                detail=f"Вариант {candidate.position} слишком похож на уже существующее фото карточки WB (pHash distance={distance})",
                             )
 
             # A previous attempt may have created a campaign and then stopped
@@ -5508,49 +5437,6 @@ class ABTestService:
                 locked_stuck = await self.repository.get_for_update(stuck_test.user_id, stuck_test.id)
                 if not locked_stuck or not locked_stuck.wb_campaign_id:
                     return
-                # FIX-1. The candidate was chosen BEFORE this card lock was
-                # available. A start / stage operation that held the lock may
-                # have finished successfully meanwhile. Re-evaluate the reason
-                # for the emergency action and never stop a healthy campaign.
-                if (
-                    locked_stuck.status == ABTestStatus.RUNNING
-                    and locked_stuck.campaign_state == "running"
-                    and locked_stuck.operation_state == ABTestOperationStatus.SUCCEEDED.value
-                    and not locked_stuck.incident_id
-                ):
-                    return
-                # FIX-2. A test interrupted mid photo-swap (scheduler timeout,
-                # crash) is FAILED with the campaign PAUSED and a foreign photo
-                # on the card. "paused" used to be skipped here, so nobody ever
-                # restored the card. Confirm the stop and restore the originals;
-                # on failure keep a concrete unresolved incident.
-                if (
-                    locked_stuck.campaign_state == "paused"
-                    and locked_stuck.status == ABTestStatus.FAILED
-                    and locked_stuck.lifecycle_lock
-                ):
-                    try:
-                        connection = await self._connection_or_404(locked_stuck.user_id, locked_stuck.connection_id, require_ab_access=False)
-                        content, promotion = await self._clients(connection)
-                        await self._finish_loaded(locked_stuck, content, promotion, stopped=True)
-                        locked_stuck.last_error = (
-                            "Прерванная операция завершена планировщиком: кампания остановлена, "
-                            "исходные фото восстановлены."
-                        )
-                    except Exception as recovery_exc:
-                        logger.warning(
-                            "A/B recovery of interrupted operation failed test_id=%s: %s",
-                            locked_stuck.id,
-                            ABTestService._safe_error(recovery_exc),
-                        )
-                        # _finish_loaded already recorded incident/last_error.
-                        if not locked_stuck.last_error:
-                            locked_stuck.last_error = (
-                                "Восстановление после прерванной операции не удалось: "
-                                f"{ABTestService._safe_error(recovery_exc)}"
-                            )[:2000]
-                    await self.db.commit()
-                    return
                 if locked_stuck.campaign_state not in {
                     "running", "starting", "unknown", "pause_requested", "stop_requested", "created",
                 }:
@@ -5623,12 +5509,7 @@ class ABTestService:
                                     candidate.last_error = f"Фоновая операция не завершена; требуется безопасная остановка. Инцидент {candidate.incident_id}."
                                     await worker_db.commit()
 
-        # FIX-2. Both phases run together: a slow photo swap in the sync phase
-        # must not postpone emergency stops of other tests. (Candidate lists are
-        # disjoint: RUNNING vs non-RUNNING.)
-        jobs = []
         for safety, loader in ((False, self.repository.list_running), (True, self.repository.list_unresolved_campaigns)):
             candidates = [(test.user_id, test.id) for test in await loader()]
             await self.db.commit()
-            jobs.extend(run_one(user_id, test_id, safety) for user_id, test_id in candidates)
-        await asyncio.gather(*jobs)
+            await asyncio.gather(*(run_one(user_id, test_id, safety) for user_id, test_id in candidates))
