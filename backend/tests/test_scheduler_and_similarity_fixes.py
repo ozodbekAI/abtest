@@ -151,9 +151,7 @@ async def test_fix1_failed_test_with_active_campaign_is_still_stopped():
     svc = service_with(test, calls)
     import asyncio
     await svc._scheduler_safety_one(test, asyncio.Semaphore(1))
-    # A3: a failed test with a live campaign owes BOTH stop and card restore;
-    # _finish_loaded(stopped=True) performs the confirmed stop and the restore.
-    assert ("finish", True) in calls
+    assert ("finish", True) in calls  # safety finish stops and restores media
 
 
 async def test_fix1_running_but_abandoned_operation_is_still_handled():
@@ -162,7 +160,7 @@ async def test_fix1_running_but_abandoned_operation_is_still_handled():
     svc = service_with(test, calls)
     import asyncio
     await svc._scheduler_safety_one(test, asyncio.Semaphore(1))
-    assert "stop" in calls
+    assert ("finish", True) in calls
 
 
 async def test_fix2_interrupted_swap_with_paused_campaign_gets_finish_and_restore():

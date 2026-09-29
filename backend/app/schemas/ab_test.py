@@ -68,6 +68,7 @@ class ABTestVariantResponse(BaseModel):
     ctr: float | None = None
     spend_rub: float
     is_winner: bool
+    attribution_quality: str = "unverified"
     orders: int = 0
     cpo: float | None = None
 
@@ -91,6 +92,12 @@ class ABTestResponse(BaseModel):
     current_variant_order: int
     winner_variant_order: int | None = None
     winner_decision: str | None = None
+    winner_p_value: float | None = None
+    winner_confidence: float = 0.95
+    winner_worst_case_safe: bool | None = None
+    stats_reconciliation_status: str | None = None
+    stats_reconciliation_elapsed_sec: int = 0
+    stats_reconciliation_stable_snapshots: int = 0
     operation_state: str = "ready"
     campaign_state: str = "not_created"
     media_status: str = "original"

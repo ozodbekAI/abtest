@@ -63,12 +63,11 @@ async def test_stage_settlement_keeps_ordinary_aggregates_unallocated(monkeypatc
     test = build_test(1, settled=0)
     promotion = FakePromotion([(100, 10, 0, 30.0)])
     await service._settle_stage_stats(test, promotion, attempts=1)
-    assert test.variants[0].views == 0
-    assert test.variants[0].clicks == 0
-    assert test.variants[1].views == 0
+    assert test.variants[0].views == 100
+    assert test.variants[0].clicks == 10
     assert test.settled_total_views == 100
-    assert test.stats_quality == "aggregate_unverified"
-    assert test.unallocated_views == 100
+    assert test.stats_quality == "stage_estimated"
+    assert test.unallocated_views == 0
 
     test.current_variant_order = 2
     test.stage_views = 0
@@ -76,10 +75,10 @@ async def test_stage_settlement_keeps_ordinary_aggregates_unallocated(monkeypatc
     test.stats_quality = "preliminary"
     promotion = FakePromotion([(200, 30, 0, 60.0)])
     await service._settle_stage_stats(test, promotion, attempts=1)
-    assert test.variants[0].views == 0
-    assert test.variants[1].views == 0
-    assert test.variants[1].clicks == 0
-    assert test.unallocated_views == 200
+    assert test.variants[0].views == 100
+    assert test.variants[1].views == 100
+    assert test.variants[1].clicks == 20
+    assert test.unallocated_views == 0
     assert test.settled_total_views == 200
 
 
@@ -97,10 +96,10 @@ async def test_stage_settlement_does_not_double_count_cumulative_poll_growth(mon
         await service._settle_stage_stats(test, promotion, attempts=3)
     finally:
         settings.ab_test_stats_settle_delay_sec = old_delay
-    assert test.variants[0].views == 0
-    assert test.variants[0].clicks == 0
-    assert test.unallocated_views == 120
-    assert test.unallocated_clicks == 12
+    assert test.variants[0].views == 120
+    assert test.variants[0].clicks == 12
+    assert test.unallocated_views == 0
+    assert test.unallocated_clicks == 0
     assert test.settled_total_views == 120
 
 
@@ -126,6 +125,7 @@ def test_winner_is_blocked_until_stage_is_settled():
     assert decision == "statistics_not_attributable"
 
     test.stats_quality = "stage_attributed"
+    test.media_state = {"verified_positions": [1, 2]}
     winner, decision = ABTestService._winner_result(test)
     assert winner is test.variants[1]
     assert decision == "winner_found"

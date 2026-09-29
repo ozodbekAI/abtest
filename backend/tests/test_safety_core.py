@@ -47,6 +47,7 @@ def test_winner_requires_stage_attribution():
 
 def test_winner_is_deterministic_after_stage_settlement():
     test = make_test(stats_quality='stage_attributed')
+    test.media_state = {'verified_positions': [1, 2]}
     winner, decision = ABTestService._winner_result(test)
     assert decision == 'winner_found'
     assert winner is test.variants[0]
@@ -54,6 +55,7 @@ def test_winner_is_deterministic_after_stage_settlement():
 
 def test_winner_rejects_insufficient_stage_sample():
     test = make_test(stats_quality='stage_attributed', views=(299, 500))
+    test.media_state = {'verified_positions': [1, 2]}
     winner, decision = ABTestService._winner_result(test)
     assert winner is None
     assert decision == 'insufficient_data'

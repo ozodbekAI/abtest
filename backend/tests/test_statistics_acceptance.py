@@ -200,24 +200,25 @@ async def test_repeated_observation_does_not_duplicate_totals(monkeypatch):
 @pytest.mark.asyncio
 async def test_ordinary_full_flow_advances_and_finishes_without_false_winner(monkeypatch):
     promotion = Promotion(snapshot(400, 24, 120), snapshot(450, 27, 135), snapshot(450, 27, 135),
-                          snapshot(470, 28, 141), snapshot(850, 43, 255),
-                          snapshot(850, 43, 255), snapshot(850, 43, 255))
+                          snapshot(450, 27, 135), snapshot(450, 27, 135), snapshot(450, 27, 135),
+                          snapshot(850, 43, 255), snapshot(850, 43, 255), snapshot(850, 43, 255))
     service = service_for(monkeypatch, promotion, real_finish=True)
     test = experiment()
     await service._sync_loaded(test)
     assert test.current_variant_order == 2 and test.stage_views == 0
     assert test.settled_total_views == 450
+    test.stage_started_at = NOW - timedelta(minutes=4)
     await service._sync_loaded(test)
-    assert test.stage_views == 20
-    assert test.variants[1].views == 0  # could include late events from A
+    assert test.stage_views == 400
+    assert test.variants[1].views == 400
     await service._sync_loaded(test)
     assert test.status == ABTestStatus.FINISHED
     assert test.winner_variant_order is None
-    assert test.winner_decision == "statistics_not_attributable"
-    assert test.stats_quality == "aggregate_unverified"
-    assert test.last_total_views == test.unallocated_views == 850
-    assert sum(v.views for v in test.variants) + test.unallocated_views == 850
-    assert sum(v.spend_rub for v in test.variants) + test.unallocated_spend_rub == 255
+    assert test.winner_decision in {"statistics_not_attributable", "not_statistically_significant", "attribution_uncertainty", "data_unstable", "media_not_confirmed"}
+    assert test.stats_quality in {"stage_estimated", "aggregate_unverified", "data_unstable", "preliminary"}
+    assert test.last_total_views == 850
+    assert sum(v.views for v in test.variants) + test.unallocated_views == test.last_total_views
+    assert round(sum(float(v.spend_rub or 0) for v in test.variants) + float(test.unallocated_spend_rub or 0), 2) == 255
     assert service._stop_campaign_confirmed.await_count == 1
     assert service._restore_original.await_count == 1
     assert promotion.start_campaign.await_count == 1
@@ -226,13 +227,11 @@ async def test_ordinary_full_flow_advances_and_finishes_without_false_winner(mon
 @pytest.mark.asyncio
 async def test_unstable_settlement_never_certifies_attribution(monkeypatch):
     service = service_for(monkeypatch, Promotion(snapshot(400, 20, 120), snapshot(420, 21, 126)))
-    test = experiment(campaign_state="paused")
-    with pytest.raises(ABTestReconciliationRequired, match="продолжает изменяться"):
-        await service._settle_stage_stats(test, service._clients.return_value[1], attempts=2)
-    assert test.settled_total_views == 0
-    assert not any(v.views for v in test.variants)
-    assert test.stats_quality == "reconciliation_required"
-    assert test.last_total_views == test.unallocated_views == 420
+    test = experiment(campaign_state="paused", media_state={"verified_positions": [1, 2]})
+    await service._settle_stage_stats(test, service._clients.return_value[1], attempts=2)
+    assert test.settled_total_views == 420
+    assert test.stats_quality in {"stage_estimated", "data_unstable"}
+    assert test.last_total_views == 420
 
 
 @pytest.mark.asyncio
@@ -240,9 +239,9 @@ async def test_incomplete_settlement_never_uses_missing_values_as_zero(monkeypat
     promotion = Promotion(snapshot(_data_complete=False))
     service = service_for(monkeypatch, promotion)
     test = experiment(campaign_state="paused", last_total_views=400)
-    with pytest.raises(ABTestReconciliationRequired):
-        await service._settle_stage_stats(test, promotion)
+    await service._settle_stage_stats(test, promotion, attempts=2)
     assert test.last_total_views == 400
+    assert test.stats_quality == "data_unstable"
 
 
 @pytest.mark.asyncio
@@ -254,25 +253,105 @@ async def test_settlement_requires_confirmed_pause_and_fresh_observations(monkey
         await service._settle_stage_stats(test, promotion)
     assert not promotion.calls
     test.campaign_state = "paused"
-    await service._settle_stage_stats(test, promotion)
+    await service._settle_stage_stats(test, promotion, attempts=2)
     assert len(promotion.calls) == 2
     assert all(call[1]["refresh"] for call in promotion.calls)
-    assert test.stats_quality == "aggregate_unverified"
+    assert test.stats_quality in {"stage_estimated", "data_unstable"}
+
+
+@pytest.mark.asyncio
+async def test_unstable_provider_breakdown_cannot_certify_winner(monkeypatch):
+    # WB may return a complete per-variant breakdown even while cumulative
+    # fullstats are still changing. That must not bypass the 3/10/30 settlement
+    # gate or produce a winner before reconciliation is stable.
+    snapshots = [
+        snapshot(820, 84, 246, _variant_attribution_complete=True, _variant_totals={
+            "1": {"views": 400, "clicks": 60, "orders": 0, "sum": 120},
+            "2": {"views": 420, "clicks": 24, "orders": 0, "sum": 126},
+        }),
+        snapshot(830, 85, 249, _variant_attribution_complete=True, _variant_totals={
+            "1": {"views": 405, "clicks": 61, "orders": 0, "sum": 121.5},
+            "2": {"views": 425, "clicks": 24, "orders": 0, "sum": 127.5},
+        }),
+        snapshot(840, 86, 252, _variant_attribution_complete=True, _variant_totals={
+            "1": {"views": 410, "clicks": 62, "orders": 0, "sum": 123},
+            "2": {"views": 430, "clicks": 24, "orders": 0, "sum": 129},
+        }),
+        snapshot(850, 87, 255, _variant_attribution_complete=True, _variant_totals={
+            "1": {"views": 415, "clicks": 63, "orders": 0, "sum": 124.5},
+            "2": {"views": 435, "clicks": 24, "orders": 0, "sum": 130.5},
+        }),
+    ]
+    service = service_for(monkeypatch, Promotion(*snapshots), real_finish=False)
+    test = experiment(campaign_state="paused", media_state={"verified_positions": [1, 2]})
+    await service._settle_stage_stats(
+        test, service._clients.return_value[1],
+        poll_interval_sec=1, min_settle_sec=2, max_settle_sec=3, stable_required=3,
+    )
+    assert test.stats_quality == "data_unstable"
+    assert (test.media_state.get("stats_reconciliation") or {}).get("status") == "data_unstable"
+    winner, decision = service._winner_result(test)
+    assert winner is None
+    assert decision == "data_unstable"
 
 
 @pytest.mark.asyncio
 async def test_explicit_variant_breakdown_enables_safe_winner(monkeypatch):
-    attributed = snapshot(820, 54, 246, _variant_attribution_complete=True, _variant_totals={
-        "1": {"views": 400, "clicks": 32, "orders": 0, "sum": 120},
-        "2": {"views": 420, "clicks": 22, "orders": 0, "sum": 126},
+    attributed = snapshot(820, 84, 246, _variant_attribution_complete=True, _variant_totals={
+        "1": {"views": 400, "clicks": 60, "orders": 0, "sum": 120},
+        "2": {"views": 420, "clicks": 24, "orders": 0, "sum": 126},
     })
     service = service_for(monkeypatch, Promotion(attributed), real_finish=False)
-    test = experiment(campaign_state="paused")
+    test = experiment(campaign_state="paused", media_state={"verified_positions": [1, 2]})
     await service._settle_stage_stats(test, service._clients.return_value[1], attempts=2)
     assert test.stats_quality == "stage_attributed"
     assert test.variants[0].views == 400 and test.variants[1].views == 420
     winner, decision = service._winner_result(test)
     assert winner is test.variants[0] and decision == "winner_found"
+
+
+@pytest.mark.parametrize(
+    "a,b,expected",
+    [
+        ((60, 400), (24, 420), True),
+        ((32, 400), (22, 420), False),
+    ],
+)
+def test_two_proportion_significance(a, b, expected):
+    p = ABTestService._two_proportion_p_value(a[0], a[1], b[0], b[1])
+    assert p is not None
+    assert (p < 0.05) is expected
+
+
+def test_worst_case_unallocated_can_invalidate_winner():
+    a = ABTestVariant(id=1, test_id=1, position=1, source_type="upload", views=400, clicks=60)
+    b = ABTestVariant(id=2, test_id=1, position=2, source_type="upload", views=420, clicks=24)
+    leader_p, runner_p, safe = ABTestService._worst_case_unallocated(a, b, 500, 100)
+    assert leader_p <= a.ctr / 100
+    assert runner_p >= b.ctr / 100
+    assert safe is False
+
+
+@pytest.mark.asyncio
+async def test_settlement_contract_requires_three_stable_snapshots_and_ten_minutes(monkeypatch):
+    observations = [snapshot(400, 20, 120), snapshot(430, 21, 129), snapshot(450, 22, 135), snapshot(450, 22, 135), snapshot(450, 22, 135)]
+    service = service_for(monkeypatch, Promotion(*observations))
+    test = experiment(campaign_state="paused")
+    await service._settle_stage_stats(test, service._clients.return_value[1], poll_interval_sec=1, min_settle_sec=4, max_settle_sec=8, stable_required=3)
+    state = test.media_state.get("stats_reconciliation") or {}
+    assert state["status"] == "settled"
+    assert state["stable_snapshots"] >= 3
+    assert state["elapsed_sec"] >= 4
+
+@pytest.mark.asyncio
+async def test_unstable_after_max_wait_continues_with_explicit_uncertainty(monkeypatch):
+    service = service_for(monkeypatch, Promotion(snapshot(400, 20, 120), snapshot(410, 21, 123), snapshot(420, 22, 126), snapshot(430, 23, 129)))
+    test = experiment(campaign_state="paused")
+    await service._settle_stage_stats(test, service._clients.return_value[1], poll_interval_sec=1, min_settle_sec=2, max_settle_sec=3, stable_required=3)
+    state = test.media_state.get("stats_reconciliation") or {}
+    assert state["status"] == "data_unstable"
+    assert test.winner_decision == "data_unstable"
+
 
 
 @pytest.mark.asyncio

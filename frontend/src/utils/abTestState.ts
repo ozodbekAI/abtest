@@ -9,7 +9,7 @@ export function mediaStateLabel(value?: string | null) {
 }
 
 export function statsStateLabel(value?: string | null) {
-  return ({ not_started: 'Данные ещё не получены', preliminary: 'Предварительные данные', stage_attributed: 'Подтверждена разбивка по этапам', incomplete: 'Неполные данные', reconciliation_required: 'Требуется сверка статистики', aggregate_unverified: 'Данные кампании без подтверждённой разбивки по фото' } as Record<string, string>)[value || ''] || 'Качество данных не подтверждено';
+  return ({ not_started: 'Данные ещё не получены', preliminary: 'Предварительные данные', stage_attributed: 'Подтверждена разбивка по этапам', stage_estimated: 'Оценка по этапам с маркировкой точности', data_unstable: 'Данные неустойчивы', incomplete: 'Неполные данные', reconciliation_required: 'Требуется сверка статистики', aggregate_unverified: 'Агрегированные данные без подтверждённой разбивки по фото' } as Record<string, string>)[value || ''] || 'Качество данных не подтверждено';
 }
 
 export function safetyClosed(test: ABTest) {
@@ -43,7 +43,7 @@ export function testStatusLabel(test: ABTest) {
 }
 
 export function decisionLabel(decision?: string | null) {
-  return ({ winner_found: 'Победитель определён', no_clear_winner: 'Явного победителя нет', insufficient_data: 'Недостаточно данных', statistics_not_attributable: 'Нельзя надёжно распределить статистику по фото', test_interrupted: 'Серия прервана; победитель не определён' } as Record<string, string>)[decision || ''] || 'Результат сравнения ещё не подтверждён';
+  return ({ winner_found: 'Победитель определён', no_clear_winner: 'Явного победителя нет', insufficient_data: 'Недостаточно данных', statistics_not_attributable: 'Нельзя надёжно распределить статистику по фото', not_statistically_significant: 'Разница CTR не достигла статистической значимости 95%', attribution_uncertainty: 'Результат чувствителен к нераспределённым данным', data_unstable: 'Данные неустойчивы после 30 минут сверки', media_not_confirmed: 'Не все фото подтверждены как установленные', test_interrupted: 'Серия прервана; победитель не определён' } as Record<string, string>)[decision || ''] || 'Результат сравнения ещё не подтверждён';
 }
 
 export function moduleActionLabel(test: ABTest) {

@@ -43,10 +43,18 @@ class Settings(BaseSettings):
     media_url_expire_sec: int = 3600
     ab_test_scheduler_interval_sec: int = 60
     ab_test_no_progress_timeout_sec: int = 172800
-    ab_test_stats_settle_attempts: int = 3
-    ab_test_stats_settle_delay_sec: int = 10
+    # Stage reconciliation contract (Sergey 2026-09-28): poll every 3 min,
+    # settle after >=10 min and three consecutive identical snapshots,
+    # hard-stop the reconciliation wait at 30 min.
+    ab_test_stats_settle_attempts: int = 3  # legacy compatibility; no longer the primary control
+    ab_test_stats_settle_delay_sec: int = 180  # 3 minutes
+    ab_test_stats_min_settle_sec: int = 600  # 10 minutes
+    ab_test_stats_max_settle_sec: int = 1800  # 30 minutes
+    ab_test_stats_stable_snapshots: int = 3
+    ab_test_stats_transition_window_sec: int = 180  # first 3 minutes of a new stage stay unallocated
+    ab_test_winner_confidence: float = 0.95
     ab_test_budget_guard_reserve_rub: int = 300
-    ab_test_scheduler_per_test_timeout_sec: int = 1500
+    ab_test_scheduler_per_test_timeout_sec: int = 2400
     ab_test_scheduler_concurrency: int = 4
     ab_test_max_budget_rub: int = 1_000_000_000
 

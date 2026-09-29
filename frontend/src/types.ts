@@ -197,6 +197,7 @@ export type ABTestVariant = {
   cpo?: number | null;
   spend_rub: number;
   is_winner: boolean;
+  attribution_quality: 'confirmed' | 'estimated' | 'unstable' | 'unverified' | string;
 };
 
 export type ABTest = {
@@ -217,7 +218,13 @@ export type ABTest = {
   placement: string;
   current_variant_order: number;
   winner_variant_order?: number | null;
-  winner_decision?: 'winner_found' | 'no_clear_winner' | 'insufficient_data' | 'statistics_not_attributable' | 'test_interrupted' | null;
+  winner_decision?: 'winner_found' | 'no_clear_winner' | 'insufficient_data' | 'statistics_not_attributable' | 'test_interrupted' | 'not_statistically_significant' | 'attribution_uncertainty' | 'data_unstable' | 'media_not_confirmed' | null;
+  winner_p_value?: number | null;
+  winner_confidence?: number;
+  winner_worst_case_safe?: boolean | null;
+  stats_reconciliation_status?: string | null;
+  stats_reconciliation_elapsed_sec?: number;
+  stats_reconciliation_stable_snapshots?: number;
   operation_state: string;
   campaign_state: string;
   media_status: string;

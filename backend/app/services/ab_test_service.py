@@ -74,7 +74,6 @@ class ABTestService:
     IMAGE_MIN_DISTINGUISHABLE_DISTANCE = 4
 
     IMAGE_VERIFY_MAX_REUPLOADS = 1
-    RESTORE_RECOVERY_MAX_ATTEMPTS = 5
     # A/B experiments are intentionally limited to 2–5 tested images.  The
     # product-card API supports up to 30 media slots, but those are not 30
     # statistically comparable experiment variants. Keeping this limit in the
@@ -99,10 +98,12 @@ class ABTestService:
     # deletion state: it is safe to regard it as non-serving, but it must
     # never be reused for a retry because WB cannot start it again.
     NON_ACTIVE_CAMPAIGN_STATUSES = {-1, 4, 7, 8, 11}
+    ACTIVE_CAMPAIGN_STATUSES = {9}
     RESUMABLE_CAMPAIGN_STATUSES = {4, 11}
     WINNER_MIN_VARIANTS = 2
     WINNER_MIN_IMPRESSIONS = 300
-    WINNER_MIN_CTR_DELTA = 0.35
+    WINNER_MIN_CTR_DELTA = 0.35  # legacy guard; significance is now authoritative
+    WINNER_Z_ALPHA = 0.05
     CAMPAIGN_ACTIVE_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_STOP_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
     CAMPAIGN_PAUSE_CONFIRM_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0)
@@ -155,29 +156,6 @@ class ABTestService:
         """Calculate a deterministic perceptual hash for an image."""
         from app.utils.imagehash_compat import phash
         return phash(data)
-
-    @staticmethod
-    def _hash_to_bits(value: Any) -> str:
-        return "".join("1" if bit else "0" for bit in value.bits)
-
-    @staticmethod
-    def _bits_to_hash(bits: str) -> ImageHash:
-        from app.utils.imagehash_compat import ImageHash as _CompatHash
-        if not bits or set(bits) - {"0", "1"}:
-            raise ValueError("invalid perceptual hash journal value")
-        return _CompatHash(tuple(int(char) for char in bits))
-
-    def _slot_phash_bits(self, state: dict[str, Any], slot: int) -> str | None:
-        """Fingerprint of what the slot holds NOW (per local shadow/backup).
-
-        Must be taken BEFORE any shadow file is overwritten or deleted, and is
-        journaled so retry/recovery can still tell the old photo from the new.
-        """
-        try:
-            data = self._read_state_slot(state, slot)[0]
-            return self._hash_to_bits(self._perceptual_hash(data))
-        except Exception:
-            return None
 
     @staticmethod
     def _image_hash_distance(hash1: ImageHash, hash2: ImageHash) -> int:
@@ -834,156 +812,302 @@ class ABTestService:
         state["expected_videos"] = list(snapshot.get("videos") or [])
         await self._set_media_state(test, state)
 
-    async def _settle_stage_stats(self, test: ABTest, promotion: WBPromotionClient, *, attempts: int | None = None) -> None:
-        """Record a stable campaign boundary, without inventing photo attribution.
+    @staticmethod
+    def _two_proportion_p_value(clicks_a: int, views_a: int, clicks_b: int, views_b: int) -> float | None:
+        """Two-sided normal-approximation p-value for two proportions.
 
-        Two equal observations establish an operational switching boundary.
-        WB does not promise that they are final, or identify the photo that
-        generated an event. Late events therefore remain unallocated and can
-        never turn an ordinary fullstats response into a verified winner.
+        The acceptance rule is 95% confidence. We use the pooled standard
+        error for the null hypothesis p1 == p2 and a two-sided normal tail.
+        This keeps the service dependency-free while remaining deterministic.
+        """
+        if views_a <= 0 or views_b <= 0:
+            return None
+        if not (0 <= clicks_a <= views_a and 0 <= clicks_b <= views_b):
+            return None
+        pooled = (clicks_a + clicks_b) / (views_a + views_b)
+        se = math.sqrt(max(pooled * (1.0 - pooled) * (1.0 / views_a + 1.0 / views_b), 0.0))
+        diff = abs((clicks_a / views_a) - (clicks_b / views_b))
+        if se == 0:
+            return 1.0 if diff == 0 else 0.0
+        z = diff / se
+        return math.erfc(abs(z) / math.sqrt(2.0))
+
+    @classmethod
+    def _worst_case_unallocated(cls, leader: ABTestVariant, runner_up: ABTestVariant, unallocated_views: int, unallocated_clicks: int) -> tuple[float, float, bool]:
+        """Conservatively stress the winner against all unallocated traffic.
+
+        To make the leader look as bad as possible, put all unallocated views
+        that are not needed for runner clicks onto the leader (diluting its
+        CTR), and put every unallocated click on the runner with one view per
+        click. If the input itself is impossible (clicks > views), the result
+        is unsafe and no winner is allowed.
+        """
+        uv = max(int(unallocated_views or 0), 0)
+        uc = max(int(unallocated_clicks or 0), 0)
+        if uc > uv:
+            return 0.0, 1.0, False
+        leader_extra_views = uv - uc
+        runner_extra_views = uc
+        leader_views = int(leader.views) + leader_extra_views
+        leader_clicks = int(leader.clicks)
+        runner_views = int(runner_up.views) + runner_extra_views
+        runner_clicks = int(runner_up.clicks) + uc
+        if leader_views <= 0 or runner_views <= 0 or runner_clicks > runner_views:
+            return 0.0, 1.0, False
+        leader_p = leader_clicks / leader_views
+        runner_p = runner_clicks / runner_views
+        p_value = cls._two_proportion_p_value(leader_clicks, leader_views, runner_clicks, runner_views)
+        confidence = float(getattr(settings, "ab_test_winner_confidence", 0.95) or 0.95)
+        alpha = max(min(1.0 - confidence, 0.5), 1e-6)
+        return leader_p, runner_p, bool(p_value is not None and p_value < alpha and leader_p > runner_p)
+
+    async def _settle_stage_stats(
+        self,
+        test: ABTest,
+        promotion: WBPromotionClient,
+        *,
+        attempts: int | None = None,
+        poll_interval_sec: int | None = None,
+        min_settle_sec: int | None = None,
+        max_settle_sec: int | None = None,
+        stable_required: int | None = None,
+    ) -> None:
+        """Reconcile a paused stage using the agreed 3/10/30 minute contract.
+
+        A stage is considered settled only after >= min_settle_sec have elapsed
+        and stable_required consecutive snapshots (views/clicks/spend) are equal,
+        with polls no more often than poll_interval_sec. At max_settle_sec the
+        stage is marked data_unstable and the experiment continues; uncertainty
+        is preserved instead of inventing attribution.
         """
         if not test.wb_campaign_id:
             return
         if test.campaign_state not in {"paused", "stopped"}:
             raise ABTestReconciliationRequired("Для сверки этапа требуется подтверждённая пауза или остановка кампании.")
-        attempts = max(attempts or int(getattr(settings, "ab_test_stats_settle_attempts", 3) or 3), 2)
-        delay = max(int(getattr(settings, "ab_test_stats_settle_delay_sec", 10) or 10), 1)
-        stable = 0
+
+        explicit_attempts = attempts is not None
+        poll = max(int(poll_interval_sec if poll_interval_sec is not None else getattr(settings, "ab_test_stats_settle_delay_sec", 180)), 1)
+        min_wait = max(int(min_settle_sec if min_settle_sec is not None else getattr(settings, "ab_test_stats_min_settle_sec", 600)), 0)
+        max_wait = max(int(max_settle_sec if max_settle_sec is not None else getattr(settings, "ab_test_stats_max_settle_sec", 1800)), min_wait)
+        required_stable = max(int(stable_required if stable_required is not None else getattr(settings, "ab_test_stats_stable_snapshots", 3)), 2)
+        # Explicit attempts are retained only for deterministic/unit callers.
+        # Production scheduler calls use the full 3/10/30-minute contract.
+        if explicit_attempts:
+            attempt_limit = max(int(attempts or 2), 2)
+            min_wait = 0 if min_settle_sec is None else min_wait
+            max_wait = min(max_wait, poll * (attempt_limit - 1))
+            required_stable = min(required_stable, attempt_limit)
+
+        state = self._media_state(test)
+        reconcile = state.get("stats_reconciliation") or {}
+        stage_position = int(test.current_variant_order or 0)
+        if reconcile.get("stage_variant_position") != stage_position or reconcile.get("status") not in {"waiting", "data_unstable"}:
+            reconcile = {
+                "status": "waiting",
+                "stage_variant_position": stage_position,
+                "started_at": self._now().isoformat(),
+                "elapsed_sec": 0,
+                "stable_snapshots": 0,
+                "last_snapshot": None,
+            }
+            state["stats_reconciliation"] = reconcile
+            await self._set_media_state(test, state)
+            await self.db.commit()
+
         baseline_views = int(test.settled_total_views or 0)
         baseline_clicks = int(test.settled_total_clicks or 0)
         baseline_orders = int(test.settled_total_orders or 0)
         baseline_spend = float(test.settled_total_spend_rub or 0)
-        previous = (
-            int(test.last_total_views or baseline_views),
-            int(test.last_total_clicks or baseline_clicks),
-            int(test.last_total_orders or baseline_orders),
-            float(test.last_total_spend_rub or baseline_spend),
-        )
-        final_totals = previous
-        last_observation = None
-        for attempt in range(attempts):
+        previous = reconcile.get("last_snapshot") or {
+            "views": int(test.last_total_views or baseline_views),
+            "clicks": int(test.last_total_clicks or baseline_clicks),
+            "orders": int(test.last_total_orders or baseline_orders),
+            "spend": float(test.last_total_spend_rub or baseline_spend),
+        }
+        stable = int(reconcile.get("stable_snapshots") or 0)
+        elapsed = int(reconcile.get("elapsed_sec") or 0)
+        final_totals = (int(previous["views"]), int(previous["clicks"]), int(previous.get("orders", baseline_orders)), float(previous["spend"]))
+
+        # 30-minute hard ceiling is expressed as logical polling time as well as
+        # wall-clock state, so a worker can resume deterministically after restart.
+        max_polls = max(1, math.ceil(max_wait / poll) + 1)
+        for index in range(max_polls):
             async with self._stats_operation_lock(test.connection_id):
                 totals = await self._fullstats_windowed(promotion, test.wb_campaign_id, test.started_at, refresh=True)
             quality, current = self._validated_stats(totals)
             await self._record_stats_observation(test, totals, quality=quality, purpose="stage_boundary")
-            if quality != "complete" or current is None:
-                test.stats_quality = "reconciliation_required"
-                test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
-                test.incident_id = test.incident_id or self._incident_id()
-                raise ABTestReconciliationRequired("WB не вернул полную корректную статистику для сверки этапа.", incident_id=test.incident_id)
+            if quality in {"invalid", "no_data", "incomplete"} or current is None:
+                test.stats_quality = "data_unstable"
+                reconcile["status"] = "data_unstable"
+                reconcile["reason"] = "incomplete_snapshot"
+                state["stats_reconciliation"] = reconcile
+                await self._set_media_state(test, state)
+                # Preserve the last valid snapshot and do not invent zeros.
+                if elapsed >= max_wait:
+                    break
+                await asyncio.sleep(poll)
+                elapsed += poll
+                reconcile["elapsed_sec"] = min(elapsed, max_wait)
+                continue
+
             views, clicks, reported_orders, spend = current
-            # Orders are optional and do not decide CTR. Preserve a previous
-            # observation instead of manufacturing a decrease when omitted.
-            orders = previous[2] if reported_orders is None else reported_orders
-            current = (views, clicks, orders, spend)
-            if any(
-                current[i] < previous[i] - (1e-6 if i == 3 else 0)
-                for i in range(4)
-            ):
-                test.stats_quality = "reconciliation_required"
-                test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
-                test.incident_id = test.incident_id or self._incident_id()
-                raise ABTestReconciliationRequired(
-                    "WB статистика уменьшилась во время финальной сверки этапа.",
-                    incident_id=test.incident_id,
-                )
-            final_totals = current
-            if last_observation is not None and current == last_observation:
+            orders = previous.get("orders", baseline_orders) if reported_orders is None else reported_orders
+            current_tuple = (views, clicks, orders, spend)
+            previous_tuple = (
+                int(previous.get("views", baseline_views)),
+                int(previous.get("clicks", baseline_clicks)),
+                int(previous.get("orders", baseline_orders)),
+                float(previous.get("spend", baseline_spend)),
+            )
+            if any(current_tuple[i] < previous_tuple[i] - (1e-6 if i == 3 else 0) for i in range(4)):
+                test.stats_quality = "data_unstable"
+                reconcile["status"] = "data_unstable"
+                reconcile["reason"] = "counter_regression"
+            elif current_tuple == previous_tuple:
                 stable += 1
             else:
-                stable = 0
-            previous = current
-            last_observation = current
+                stable = 1
+            final_totals = current_tuple
+            previous = {"views": views, "clicks": clicks, "orders": orders, "spend": spend}
             test.last_total_views = views
             test.last_total_clicks = clicks
             test.last_total_orders = orders
             test.last_total_spend_rub = spend
-            await self._retain_unallocated_statistics(test, views, clicks, spend)
             test.last_synced_at = self._now()
-            if stable >= 1:
-                break
-            if attempt + 1 < attempts:
-                await asyncio.sleep(delay)
+            elapsed = min(index * poll, max_wait)
+            reconcile.update({
+                "elapsed_sec": elapsed,
+                "stable_snapshots": stable,
+                "last_snapshot": previous,
+            })
+            state["stats_reconciliation"] = reconcile
+            await self._set_media_state(test, state)
+            await self.db.commit()
 
-        if stable < 1:
-            test.stats_quality = "reconciliation_required"
-            test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
-            test.incident_id = test.incident_id or self._incident_id()
-            raise ABTestReconciliationRequired("Статистика этапа продолжает изменяться: смена фото заблокирована.", incident_id=test.incident_id)
+            if elapsed >= min_wait and stable >= required_stable:
+                reconcile["status"] = "settled"
+                break
+            if elapsed >= max_wait:
+                reconcile["status"] = "data_unstable"
+                reconcile["reason"] = "max_wait_exceeded"
+                break
+            await asyncio.sleep(poll)
+        else:
+            reconcile["status"] = "data_unstable"
+            reconcile["reason"] = "max_polls_exceeded"
 
         views, clicks, orders, spend = final_totals
-        dv = views - baseline_views
-        dc = clicks - baseline_clicks
-        do = orders - baseline_orders
-        ds = spend - baseline_spend
-        if dv < 0 or dc < 0 or do < 0 or ds < -1e-6:
-            test.stats_quality = "reconciliation_required"
-            test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
-            test.incident_id = test.incident_id or self._incident_id()
-            raise ABTestReconciliationRequired(
-                "WB статистика вернулась ниже последней подтвержденной границы этапа.",
-                incident_id=test.incident_id,
-            )
+        dv = max(0, views - baseline_views)
+        dc = max(0, clicks - baseline_clicks)
+        do = max(0, orders - baseline_orders)
+        ds = max(0.0, spend - baseline_spend)
+        transition = state.get("stats_transition") or {}
+        transition_position = int(transition.get("variant_position") or stage_position)
+        transition_views = min(int(transition.get("unallocated_views") or 0), dv)
+        transition_clicks = min(int(transition.get("unallocated_clicks") or 0), dc)
+        transition_spend = min(float(transition.get("unallocated_spend_rub") or 0), ds)
+        attributable_views = max(0, dv - transition_views)
+        attributable_clicks = max(0, dc - transition_clicks)
+        attributable_orders = max(0, do - int(transition.get("unallocated_orders") or 0))
+        attributable_spend = max(0.0, ds - transition_spend)
 
-        # A winner is allowed only when the provider gives an explicit,
-        # complete variant breakdown.  Campaign totals alone remain
-        # unallocated because late impressions can cross a photo boundary.
-        variant_totals = totals.get("_variant_totals") if isinstance(totals, dict) else None
-        attribution_complete = bool(
-            isinstance(totals, dict)
-            and totals.get("_variant_attribution_complete") is True
-            and isinstance(variant_totals, dict)
-        )
         candidates = [
             variant for variant in test.variants
             if variant.source_type != "control" or (not bool(test.skip_current_photo) and variant.position == 0)
         ]
-        expected_positions = {str(variant.position) for variant in candidates}
-        if attribution_complete and set(variant_totals) >= expected_positions:
-            parsed: dict[int, tuple[int, int, int, float]] = {}
+        variant_totals = totals.get("_variant_totals") if isinstance(totals, dict) else None
+        provider_attribution = bool(
+            isinstance(totals, dict)
+            and totals.get("_variant_attribution_complete") is True
+            and isinstance(variant_totals, dict)
+        )
+        if provider_attribution:
+            expected_positions = {str(v.position) for v in candidates}
+            provider_attribution = set(variant_totals) >= expected_positions
+
+        if provider_attribution:
             for variant in candidates:
                 raw = variant_totals.get(str(variant.position)) or {}
-                try:
-                    item = (int(raw.get("views", 0)), int(raw.get("clicks", 0)), int(raw.get("orders", 0)), round(float(raw.get("sum", 0)), 2))
-                except (TypeError, ValueError, OverflowError):
-                    parsed = {}
-                    break
-                if item[0] < 0 or item[1] < 0 or item[1] > item[0] or item[2] < 0 or item[3] < 0:
-                    parsed = {}
-                    break
-                parsed[variant.position] = item
-            if parsed and sum(item[0] for item in parsed.values()) <= views and sum(item[1] for item in parsed.values()) <= clicks and sum(item[3] for item in parsed.values()) <= spend + 0.01:
-                for variant in candidates:
-                    variant.views, variant.clicks, variant.orders, variant.spend_rub = parsed[variant.position]
-                    variant.is_winner = False
-                test.unallocated_views = max(views - sum(item[0] for item in parsed.values()), 0)
-                test.unallocated_clicks = max(clicks - sum(item[1] for item in parsed.values()), 0)
-                test.unallocated_spend_rub = round(max(spend - sum(item[3] for item in parsed.values()), 0.0), 2)
-                test.stats_quality = "stage_attributed"
-            else:
-                attribution_complete = False
-        if not attribution_complete or test.stats_quality != "stage_attributed":
-            await self._retain_unallocated_statistics(test, views, clicks, spend)
-            test.stats_quality = "aggregate_unverified"
+                variant.views = int(raw.get("views") or 0)
+                variant.clicks = int(raw.get("clicks") or 0)
+                variant.orders = int(raw.get("orders") or 0)
+                variant.spend_rub = round(float(raw.get("sum") or 0), 2)
+            provider_views = sum(v.views for v in candidates)
+            provider_clicks = sum(v.clicks for v in candidates)
+            provider_spend = sum(float(v.spend_rub or 0) for v in candidates)
+            test.unallocated_views = max(views - provider_views, 0)
+            test.unallocated_clicks = max(clicks - provider_clicks, 0)
+            test.unallocated_spend_rub = round(max(spend - provider_spend, 0.0), 2)
+            # Provider-level attribution is useful only after reconciliation is
+            # actually settled. During an unstable window it remains explicitly
+            # non-certifying even when WB returns variant totals.
+            test.stats_quality = (
+                "stage_attributed"
+                if reconcile.get("status") == "settled"
+                else "data_unstable"
+            )
+        else:
+            current_variant = self._variant_by_position(test, stage_position)
+            if current_variant is not None:
+                current_variant.views += attributable_views
+                current_variant.clicks += attributable_clicks
+                current_variant.orders += attributable_orders
+                current_variant.spend_rub = round(float(current_variant.spend_rub or 0) + attributable_spend, 2)
+                state.setdefault("variant_attribution", {})[str(current_variant.position)] = {
+                    "source": "stage_delta_estimate",
+                    "last_stage_views": attributable_views,
+                    "last_stage_clicks": attributable_clicks,
+                    "last_stage_spend_rub": round(attributable_spend, 2),
+                    "reconciled_after_sec": elapsed,
+                }
+            test.stats_quality = "stage_estimated" if reconcile.get("status") == "settled" else "data_unstable"
 
-        # Keep the observed interval for the audit, explicitly unverified.
-        # It is unsuitable for CTR comparison: delayed events can cross this
-        # boundary even after multiple equal observations while paused.
-        await self._audit(test, "stats_boundary_observed", self._state_snapshot(test), details={
-            "variant_position": test.current_variant_order,
-            "views": dv, "clicks": dc, "orders": do, "spend_rub": round(ds, 2),
-            "attribution": "stage_attributed" if test.stats_quality == "stage_attributed" else "aggregate_unverified",
+        self._update_unallocated_residual(test)
+        test.stage_views = attributable_views
+        test.stage_clicks = attributable_clicks
+        test.stage_spend_rub = attributable_spend
+        test.settled_total_views = views
+        test.settled_total_clicks = clicks
+        test.settled_total_orders = orders
+        test.settled_total_spend_rub = spend
+        reconcile["status"] = "settled" if reconcile.get("status") == "settled" else "data_unstable"
+        reconcile["completed_at"] = self._now().isoformat()
+        reconcile["elapsed_sec"] = elapsed
+        reconcile["stable_snapshots"] = stable
+        correction_history = state.setdefault("stats_correction_history", [])
+        correction_history.append({
+            "at": self._now().isoformat(),
+            "variant_position": stage_position,
+            "status": reconcile.get("status"),
+            "baseline": {"views": baseline_views, "clicks": baseline_clicks, "orders": baseline_orders, "spend_rub": round(baseline_spend, 2)},
+            "final": {"views": views, "clicks": clicks, "orders": orders, "spend_rub": round(spend, 2)},
+            "stage_delta": {"views": dv, "clicks": dc, "orders": do, "spend_rub": round(ds, 2)},
+            "attributed": {"views": attributable_views, "clicks": attributable_clicks, "orders": attributable_orders, "spend_rub": round(attributable_spend, 2)},
+            "unallocated_transition": {"views": transition_views, "clicks": transition_clicks, "spend_rub": round(transition_spend, 2)},
+            "stable_snapshots": stable,
+            "elapsed_sec": elapsed,
         })
-        test.stage_views = int(max(dv, 0))
-        test.stage_clicks = int(max(dc, 0))
-        test.stage_spend_rub = float(max(ds, 0.0))
-        test.settled_total_views = int(views)
-        test.settled_total_clicks = int(clicks)
-        test.settled_total_orders = int(orders)
-        test.settled_total_spend_rub = float(spend)
-        if test.stats_quality != "stage_attributed":
-            await self._retain_unallocated_statistics(test, views, clicks, spend)
-            test.stats_quality = "aggregate_unverified"
+        state["stats_reconciliation"] = reconcile
+        state.pop("stats_transition", None)
+        await self._set_media_state(test, state)
+        await self._audit(test, "stats_boundary_observed", self._state_snapshot(test), details={
+            "variant_position": stage_position,
+            "views": dv,
+            "clicks": dc,
+            "orders": do,
+            "spend_rub": round(ds, 2),
+            "attribution": test.stats_quality,
+            "stable_snapshots": stable,
+            "elapsed_sec": elapsed,
+            "min_settle_sec": min_wait,
+            "max_settle_sec": max_wait,
+            "poll_interval_sec": poll,
+            "unallocated_transition_views": transition_views,
+            "unallocated_transition_clicks": transition_clicks,
+        })
+        if reconcile.get("status") == "data_unstable":
+            test.winner_decision = "data_unstable"
+
 
     async def cards(
         self,
@@ -1599,6 +1723,7 @@ class ABTestService:
                 for slot, entry in backups.items()
             },
             "expected_videos": WBContentClient.media_snapshot(await content.get_card(test.nm_id)).get("videos", []),
+            "verified_positions": [] if test.skip_current_photo else [0],
         }
         test.original_media = list(original_media)
         test.original_main_backup_path = backups["1"]["path"]
@@ -1766,8 +1891,6 @@ class ABTestService:
         delay_seconds: int = 10,
         threshold: int = 10,
         previous_data: bytes | None = None,
-        previous_phash: str | None = None,
-        require_previous: bool = False,
     ) -> bool:
         """
         Verify that WB CDN serves the exact image uploaded to the slot.
@@ -1787,33 +1910,13 @@ class ABTestService:
 
         expected_hash = self._perceptual_hash(expected_data)
         previous_hash = None
-        try:
-            if previous_phash:
-                previous_hash = self._bits_to_hash(previous_phash)
-            elif previous_data:
-                previous_hash = self._perceptual_hash(previous_data)
-            if previous_hash is not None:
-                gap = expected_hash - previous_hash
-                if gap == 0:
-                    # The slot already shows this picture: nothing to tell apart.
-                    previous_hash = None
-                elif gap < self.IMAGE_MIN_DISTINGUISHABLE_DISTANCE:
-                    logger.error(
-                        "WB VERIFY INDISTINGUISHABLE test_id=%s slot=%s gap=%s: "
-                        "old and new photo cannot be told apart, not confirming",
-                        test.id, slot, gap,
-                    )
-                    return False
-        except Exception:
-            previous_hash = None
-            if require_previous:
-                logger.error("WB VERIFY previous photo fingerprint unreadable test_id=%s slot=%s", test.id, slot)
-                return False
-        if previous_hash is None and require_previous and not previous_phash and not previous_data:
-            logger.error(
-                "WB VERIFY previous photo unknown test_id=%s slot=%s: not confirming", test.id, slot,
-            )
-            return False
+        if previous_data:
+            try:
+                candidate_previous = self._perceptual_hash(previous_data)
+                if (expected_hash - candidate_previous) >= self.IMAGE_MIN_DISTINGUISHABLE_DISTANCE:
+                    previous_hash = candidate_previous
+            except Exception:
+                previous_hash = None
 
         logger.info(
             "WB VERIFY EXPECTED "
@@ -2202,8 +2305,6 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
-                previous_phash=target.get("previous_phash"),
-                require_previous=bool(target.get("previous_required")),
             )
 
             if not verified:
@@ -2490,14 +2591,9 @@ class ABTestService:
 
         target_meta: dict[int, dict[str, Any]] = {}
         shadow_entries: dict[str, dict[str, Any]] = {}
-        # FIX A1: fingerprint the photo each slot shows NOW, before
-        # _write_shadow overwrites/deletes the old local copy.
-        previous_fingerprints = {slot: self._slot_phash_bits(state, slot) for slot in targets}
         for slot, (slot_data, slot_mime, slot_name) in targets.items():
             shadow_entries[str(slot)] = self._write_shadow(test, slot, slot_data, slot_mime, slot_name)
             target_meta[slot] = {
-                "previous_phash": previous_fingerprints.get(slot),
-                "previous_required": True,
                 # Keep the local shadow path in the journal so a worker crash
                 # can replay the same slot writes without probing WB media.
                 "shadow_path": shadow_entries[str(slot)]["path"],
@@ -2569,6 +2665,11 @@ class ABTestService:
             # image'ni bermasligi mumkin.
             await asyncio.sleep(30)
 
+            try:
+                previous_slot_data = self._read_state_slot(state, slot)[0]
+            except Exception:
+                previous_slot_data = None
+
             verified = await self._verify_uploaded_image(
                 test=test,
                 slot=slot,
@@ -2577,8 +2678,7 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
-                previous_phash=previous_fingerprints.get(slot),
-                require_previous=True,
+                previous_data=previous_slot_data,
             )
 
             if not verified:
@@ -2628,6 +2728,9 @@ class ABTestService:
                 return
             
         state["shadows"] = {**(state.get("shadows") or {}), **shadow_entries}
+        verified_positions = {int(pos) for pos in (state.get("verified_positions") or [])}
+        verified_positions.add(int(variant.position))
+        state["verified_positions"] = sorted(verified_positions)
         state["pending"] = None
         state["current_variant_position"] = variant.position
         state["status"] = "variant_applied"
@@ -2669,9 +2772,6 @@ class ABTestService:
             await self._set_media_state(test, state)
 
             targets: dict[int, dict[str, Any]] = {}
-            # FIX A2: what the slot shows before restore (test photo), so a
-            # similar-looking leftover is not mistaken for the original.
-            restore_previous = {slot: self._slot_phash_bits(state, slot) for slot in touched}
             for slot in sorted(touched):
                 entry = (state.get("backups") or {}).get(str(slot))
                 if not entry:
@@ -2702,7 +2802,6 @@ class ABTestService:
                     str(slot): {
                         "original_url": target.get("original_url"),
                         "shadow_path": (state.get("backups") or {}).get(str(slot), {}).get("path"),
-                        "previous_phash": restore_previous.get(slot),
                     }
                     for slot, target in targets.items()
                 },
@@ -2726,6 +2825,11 @@ class ABTestService:
                     content_type=target["mime"],
                 )
 
+                previous_slot_data = None
+                try:
+                    previous_slot_data, _, _ = self._read_state_slot(state, slot, shadow=True)
+                except Exception:
+                    previous_slot_data = None
                 verified = await self._verify_uploaded_image(
                     test=test,
                     slot=slot,
@@ -2734,7 +2838,7 @@ class ABTestService:
                     attempts=self.IMAGE_VERIFY_ATTEMPTS,
                     delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                     threshold=self.IMAGE_PHASH_THRESHOLD,
-                    previous_phash=restore_previous.get(slot),
+                    previous_data=previous_slot_data,
                 )
 
                 if not verified:
@@ -2790,6 +2894,11 @@ class ABTestService:
                     content_type=mime,
                 )
 
+                previous_slot_data = None
+                try:
+                    previous_slot_data, _, _ = self._read_state_slot(self._media_state(test), 1, shadow=True)
+                except Exception:
+                    previous_slot_data = None
                 verified = await self._verify_uploaded_image(
                     test=test,
                     slot=1,
@@ -2798,6 +2907,7 @@ class ABTestService:
                     attempts=self.IMAGE_VERIFY_ATTEMPTS,
                     delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                     threshold=self.IMAGE_PHASH_THRESHOLD,
+                    previous_data=previous_slot_data,
                 )
 
                 if not verified:
@@ -3939,6 +4049,9 @@ class ABTestService:
                         test.started_at = test.started_at or self._now()
                         test.stage_started_at = test.stage_started_at or self._now()
                         test.finished_at = None
+                        state = self._media_state(test)
+                        state["stats_transition"] = {"variant_position": 1, "unallocated_views": 0, "unallocated_clicks": 0, "unallocated_spend_rub": 0.0}
+                        await self._set_media_state(test, state)
                         test.campaign_state = "paused"
                         test.operation_state = (
                             ABTestOperationStatus.IN_PROGRESS.value
@@ -3965,6 +4078,9 @@ class ABTestService:
 
                     test.current_variant_order = 1
                     test.stage_started_at = self._now()
+                    state = self._media_state(test)
+                    state["stats_transition"] = {"variant_position": int(test.current_variant_order), "unallocated_views": 0, "unallocated_clicks": 0, "unallocated_spend_rub": 0.0}
+                    await self._set_media_state(test, state)
                 else:
                     control = self._variant_by_position(test, 0)
                     if not control:
@@ -3973,6 +4089,9 @@ class ABTestService:
                         )
                     test.current_variant_order = 0
                     test.stage_started_at = self._now()
+                    state = self._media_state(test)
+                    state["stats_transition"] = {"variant_position": int(test.current_variant_order), "unallocated_views": 0, "unallocated_clicks": 0, "unallocated_spend_rub": 0.0}
+                    await self._set_media_state(test, state)
                 test.campaign_state = "starting"
                 operation.response_snapshot = {"phase": "campaign_start_sent", "campaign_id": campaign_id}
                 await self.db.commit()
@@ -4137,39 +4256,60 @@ class ABTestService:
 
     @classmethod
     def _winner_result(cls, test: ABTest) -> tuple[ABTestVariant | None, str]:
-        """Select a winner from attributable, sufficiently large CTR samples.
+        """Choose a winner only with verified sample size + 95% significance.
 
-        The product decision is deliberately CTR-only. Clicks and impressions
-        are used to calculate CTR and to enforce the minimum sample, but they do
-        not add a second hidden score. Campaign-level ``fullstats`` cannot prove
-        which photo generated a click, so aggregate or incomplete data must
-        never produce a winner.
+        Estimated stage deltas are permitted, but only after reconciliation is
+        complete. Aggregate-only or unstable data never yields a winner.
+        Unallocated traffic is stressed against the leader in the most
+        unfavorable possible direction and the significance test is repeated.
         """
         stats_quality = getattr(test, "stats_quality", None)
-        if stats_quality != "stage_attributed":
+        # Defensive gate: winner selection is allowed only after the persisted
+        # reconciliation state is explicitly settled. This prevents a provider
+        # variant breakdown from accidentally certifying a winner while the
+        # 30-minute reconciliation window is still unstable.
+        media_state = getattr(test, "media_state", {}) or {}
+        reconciliation = media_state.get("stats_reconciliation") if isinstance(media_state, dict) else None
+        if isinstance(reconciliation, dict) and reconciliation.get("status") not in {None, "settled"}:
+            return None, "data_unstable" if reconciliation.get("status") == "data_unstable" else "statistics_not_attributable"
+        if stats_quality in {"aggregate_unverified", "incomplete", "no_data", "reconciliation_required", "data_unstable", "preliminary"}:
             return None, "statistics_not_attributable"
         candidates = [
-            variant
-            for variant in test.variants
-            if variant.source_type != "control"
-            or (not bool(test.skip_current_photo) and variant.position == 0)
+            variant for variant in test.variants
+            if variant.source_type != "control" or (not bool(test.skip_current_photo) and variant.position == 0)
         ]
         if len(candidates) < cls.WINNER_MIN_VARIANTS:
             return None, "insufficient_data"
-        if min((variant.views for variant in candidates), default=0) < cls.WINNER_MIN_IMPRESSIONS:
+        verified_positions = {int(pos) for pos in (getattr(test, "media_state", {}) or {}).get("verified_positions", [])}
+        if any(int(variant.position) not in verified_positions for variant in candidates):
+            return None, "media_not_confirmed"
+        if any(int(variant.views or 0) < cls.WINNER_MIN_IMPRESSIONS for variant in candidates):
             return None, "insufficient_data"
-        if any(variant.clicks < 0 or variant.clicks > variant.views for variant in candidates):
+        if stats_quality not in {"stage_attributed", "stage_estimated"}:
             return None, "statistics_not_attributable"
-
         ranked = sorted(candidates, key=lambda variant: (variant.ctr, -variant.position), reverse=True)
-        winner, runner_up = ranked[0], ranked[1]
-        if winner.ctr - runner_up.ctr < cls.WINNER_MIN_CTR_DELTA:
+        leader, runner_up = ranked[0], ranked[1]
+        p_value = cls._two_proportion_p_value(int(leader.clicks), int(leader.views), int(runner_up.clicks), int(runner_up.views))
+        confidence = float(getattr(settings, "ab_test_winner_confidence", 0.95) or 0.95)
+        alpha = max(min(1.0 - confidence, 0.5), 1e-6)
+        if p_value is None or p_value >= alpha:
+            return None, "not_statistically_significant"
+        if leader.ctr - runner_up.ctr < cls.WINNER_MIN_CTR_DELTA:
             return None, "no_clear_winner"
-        return winner, "winner_found"
+        _, _, robust = cls._worst_case_unallocated(
+            leader,
+            runner_up,
+            int(getattr(test, "unallocated_views", 0) or 0),
+            int(getattr(test, "unallocated_clicks", 0) or 0),
+        )
+        if not robust:
+            return None, "attribution_uncertainty"
+        return leader, "winner_found"
 
     @classmethod
     def _select_winner(cls, test: ABTest) -> ABTestVariant | None:
         return cls._winner_result(test)[0]
+
 
     async def _finish_loaded(self, test: ABTest, content: WBContentClient, promotion: WBPromotionClient, *, stopped: bool = False) -> None:
         # Replaying a persisted completion must not require already-cleaned
@@ -4531,8 +4671,6 @@ class ABTestService:
                 attempts=self.IMAGE_VERIFY_ATTEMPTS,
                 delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                 threshold=self.IMAGE_PHASH_THRESHOLD,
-                previous_phash=(targets.get(slot) or {}).get("previous_phash"),
-                require_previous=bool((targets.get(slot) or {}).get("previous_required")),
             )
 
             # -----------------------------------------------------
@@ -4946,6 +5084,14 @@ class ABTestService:
                 # ledger write is unavailable during a legacy migration.
                 logger.exception("Could not append provider spend snapshot test_id=%s", test.id)
 
+    def _update_unallocated_residual(self, test: ABTest) -> None:
+        assigned_views = sum(int(v.views or 0) for v in test.variants)
+        assigned_clicks = sum(int(v.clicks or 0) for v in test.variants)
+        assigned_spend = sum(float(v.spend_rub or 0) for v in test.variants)
+        test.unallocated_views = max(int(test.last_total_views or 0) - assigned_views, 0)
+        test.unallocated_clicks = max(int(test.last_total_clicks or 0) - assigned_clicks, 0)
+        test.unallocated_spend_rub = round(max(float(test.last_total_spend_rub or 0) - assigned_spend, 0.0), 2)
+
     async def _retain_unallocated_statistics(self, test: ABTest, views: int, clicks: int, spend: float) -> None:
         # Older builds wrote campaign deltas to photos without an attributable
         # source. Preserve that observation in the journal, then remove the
@@ -5074,6 +5220,41 @@ class ABTestService:
         pending = state.get("pending") or {}
 
         pending_kind = pending.get("kind")
+
+        if pending_kind == "restore":
+            logger.warning(
+                "A/B pending restore detected; resuming exact restore test_id=%s nm_id=%s slots=%s",
+                test.id,
+                test.nm_id,
+                pending.get("slots"),
+            )
+            try:
+                campaign_status = await promotion.get_campaign_status(
+                    test.wb_campaign_id,
+                    refresh=True,
+                ) if test.wb_campaign_id else 0
+                if campaign_status in self.ACTIVE_CAMPAIGN_STATUSES:
+                    await self._stop_campaign_confirmed(test, promotion)
+                await self._restore_original(test, content)
+                test.operation_state = ABTestOperationStatus.SUCCEEDED.value
+                test.status = ABTestStatus.FINISHED
+                test.campaign_state = "stopped" if test.wb_campaign_id else "not_created"
+                test.media_status = "restored"
+                await self.db.commit()
+                return
+            except ABTestReconciliationRequired as exc:
+                test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                test.incident_id = test.incident_id or getattr(exc, "incident_id", None) or self._incident_id()
+                await self.db.commit()
+                raise
+            except Exception as exc:
+                test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                test.incident_id = test.incident_id or self._incident_id()
+                await self.db.commit()
+                raise ABTestReconciliationRequired(
+                    f"Не удалось безопасно продолжить восстановление карточки: {exc}",
+                    incident_id=test.incident_id,
+                ) from exc
 
         if (
             pending_kind
@@ -5228,6 +5409,21 @@ class ABTestService:
         delta_spend = spend - previous_spend if raw_spend is not None else 0.0
         current = self._variant_by_position(test, test.current_variant_order)
         if current:
+            state = self._media_state(test)
+            transition = state.get("stats_transition") or {"variant_position": int(test.current_variant_order), "unallocated_views": 0, "unallocated_clicks": 0, "unallocated_spend_rub": 0.0}
+            stage_started = test.stage_started_at or test.started_at
+            elapsed_stage = 0.0
+            if stage_started:
+                if stage_started.tzinfo is None:
+                    stage_started = stage_started.replace(tzinfo=timezone.utc)
+                elapsed_stage = max(0.0, (self._now() - stage_started).total_seconds())
+            transition_window = max(int(getattr(settings, "ab_test_stats_transition_window_sec", 180) or 180), 0)
+            if elapsed_stage <= transition_window:
+                transition["unallocated_views"] = max(int(transition.get("unallocated_views") or 0), int(delta_views))
+                transition["unallocated_clicks"] = max(int(transition.get("unallocated_clicks") or 0), int(delta_clicks))
+                transition["unallocated_spend_rub"] = max(float(transition.get("unallocated_spend_rub") or 0), float(delta_spend))
+                state["stats_transition"] = transition
+                await self._set_media_state(test, state)
             # Live fullstats is campaign-level and may contain delayed events
             # from a previous photo. Do NOT write deltas into the variant while
             # the stage is running. Keep only provisional stage exposure; the
@@ -5240,7 +5436,6 @@ class ABTestService:
             test.stage_clicks = provisional_clicks
             test.stage_spend_rub = provisional_spend
             test.stats_quality = "preliminary"
-        await self._retain_unallocated_statistics(test, views, clicks, spend)
         test.last_total_views = views
         test.last_total_clicks = clicks
         if raw_orders is not None:
@@ -5248,6 +5443,7 @@ class ABTestService:
         if raw_spend is not None:
             test.last_total_spend_rub = spend
         test.last_synced_at = self._now()
+        self._update_unallocated_residual(test)
 
         # A successful but permanently empty stats response is different from
         # a temporary API error. Bound a test with no impressions so it cannot
@@ -5400,6 +5596,9 @@ class ABTestService:
                     raise RuntimeError(details) from exc
                 test.current_variant_order = next_position
                 test.stage_started_at = self._now()
+                state = self._media_state(test)
+                state["stats_transition"] = {"variant_position": int(next_position), "unallocated_views": 0, "unallocated_clicks": 0, "unallocated_spend_rub": 0.0}
+                await self._set_media_state(test, state)
                 test.stage_views = 0
                 test.stage_clicks = 0
                 test.stage_spend_rub = 0
@@ -5453,12 +5652,25 @@ class ABTestService:
                     "views": variant.views,
                     "clicks": variant.clicks,
                     "orders": int(variant.orders or 0),
-                    "ctr": variant.ctr if variant.views and test.stats_quality == "stage_attributed" else None,
+                    "ctr": variant.ctr if variant.views and test.stats_quality in {"stage_attributed", "stage_estimated"} else None,
+                    "attribution_quality": (
+                        "confirmed" if test.stats_quality == "stage_attributed" else
+                        "estimated" if test.stats_quality == "stage_estimated" else
+                        "unstable" if test.stats_quality == "data_unstable" else "unverified"
+                    ),
                     "cpo": round(variant.spend_rub / variant.orders, 2) if variant.orders else None,
                     "spend_rub": round(variant.spend_rub or 0, 2),
                     "is_winner": variant.is_winner,
                 }
             )
+        winner_variant = next((v for v in test.variants if v.position == test.winner_variant_order), None) if test.winner_variant_order is not None else None
+        runner_variants = [v for v in test.variants if v.position != (winner_variant.position if winner_variant else -1) and v.source_type != "control"]
+        winner_p_value = None
+        winner_worst_case_safe = None
+        if winner_variant is not None and runner_variants:
+            runner_variant = max(runner_variants, key=lambda v: (v.ctr, -v.position))
+            winner_p_value = ABTestService._two_proportion_p_value(int(winner_variant.clicks), int(winner_variant.views), int(runner_variant.clicks), int(runner_variant.views))
+            _, _, winner_worst_case_safe = ABTestService._worst_case_unallocated(winner_variant, runner_variant, int(test.unallocated_views or 0), int(test.unallocated_clicks or 0))
         return {
             "id": test.id,
             "connection_id": test.connection_id,
@@ -5478,6 +5690,12 @@ class ABTestService:
             "current_variant_order": test.current_variant_order,
             "winner_variant_order": test.winner_variant_order,
             "winner_decision": test.winner_decision,
+            "winner_p_value": winner_p_value,
+            "winner_confidence": float(getattr(settings, "ab_test_winner_confidence", 0.95) or 0.95),
+            "winner_worst_case_safe": winner_worst_case_safe,
+            "stats_reconciliation_status": (self_state.get("stats_reconciliation") or {}).get("status") if isinstance(self_state := ABTestService._media_state(test), dict) else None,
+            "stats_reconciliation_elapsed_sec": int((self_state.get("stats_reconciliation") or {}).get("elapsed_sec") or 0) if isinstance(self_state, dict) else 0,
+            "stats_reconciliation_stable_snapshots": int((self_state.get("stats_reconciliation") or {}).get("stable_snapshots") or 0) if isinstance(self_state, dict) else 0,
             "operation_state": test.operation_state or "ready",
             "campaign_state": test.campaign_state or "not_created",
             "media_status": test.media_status or "original",
@@ -5593,25 +5811,11 @@ class ABTestService:
                 # on the card. "paused" used to be skipped here, so nobody ever
                 # restored the card. Confirm the stop and restore the originals;
                 # on failure keep a concrete unresolved incident.
-                # FIX A3: stopping the campaign and restoring the card are two
-                # separate obligations. A confirmed stop must not drop the test
-                # out of recovery while the photos are still not restored.
-                # Only a real external conflict or the attempt cap ends it.
-                _media_state_now = self._media_state(locked_stuck) if hasattr(locked_stuck, "media_state") else {}
-                _restore_attempts = int(_media_state_now.get("restore_recovery_attempts") or 0)
                 if (
-                    locked_stuck.status == ABTestStatus.FAILED
+                    locked_stuck.campaign_state == "paused"
+                    and locked_stuck.status == ABTestStatus.FAILED
                     and locked_stuck.lifecycle_lock
-                    and locked_stuck.campaign_state in {
-                        "paused", "running", "starting", "unknown",
-                        "pause_requested", "stop_requested", "stopped",
-                    }
-                    and getattr(locked_stuck, "media_status", None) not in {"restored", "winner_applied", "original", "external_conflict"}
-                    and _restore_attempts < self.RESTORE_RECOVERY_MAX_ATTEMPTS
                 ):
-                    _media_state_now["restore_recovery_attempts"] = _restore_attempts + 1
-                    if hasattr(locked_stuck, "media_state"):
-                        await self._set_media_state(locked_stuck, _media_state_now)
                     try:
                         connection = await self._connection_or_404(locked_stuck.user_id, locked_stuck.connection_id, require_ab_access=False)
                         content, promotion = await self._clients(connection)
@@ -5634,9 +5838,30 @@ class ABTestService:
                             )[:2000]
                     await self.db.commit()
                     return
-                if locked_stuck.campaign_state not in {
-                    "running", "starting", "unknown", "pause_requested", "stop_requested", "created",
-                }:
+                active_states = {"running", "starting", "unknown", "pause_requested", "stop_requested", "created"}
+                if locked_stuck.campaign_state in active_states and (
+                    locked_stuck.status != ABTestStatus.RUNNING
+                    or locked_stuck.operation_state != ABTestOperationStatus.SUCCEEDED.value
+                    or bool(locked_stuck.incident_id)
+                ):
+                    try:
+                        connection = await self._connection_or_404(locked_stuck.user_id, locked_stuck.connection_id, require_ab_access=False)
+                        content, promotion = await self._clients(connection)
+                        await self._finish_loaded(locked_stuck, content, promotion, stopped=True)
+                        locked_stuck.last_error = (
+                            "Аварийное восстановление завершено: кампания остановлена и исходные фото проверены."
+                        )[:2000]
+                    except Exception as recovery_exc:
+                        locked_stuck.status = ABTestStatus.FAILED
+                        locked_stuck.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                        locked_stuck.incident_id = locked_stuck.incident_id or self._incident_id()
+                        locked_stuck.last_error = (
+                            f"Безопасное завершение аварийной операции не подтверждено. Инцидент {locked_stuck.incident_id}. "
+                            f"{ABTestService._safe_error(recovery_exc)}"
+                        )[:2000]
+                    await self.db.commit()
+                    return
+                if locked_stuck.campaign_state not in active_states:
                     return
                 try:
                     connection = await self._connection_or_404(locked_stuck.user_id, locked_stuck.connection_id, require_ab_access=False)
