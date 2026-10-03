@@ -1,0 +1,36 @@
+[     0s] ### F05: «Стоп» во время сверки статистики: время ответа и что происходит дальше.
+[    64s] старт: 200
+[   225s] кампания на паузе, идёт сверка. Нажимаем «Стоп».
+[   225s] стоп: HTTP 200 за 0.0 с; ответ: status=stopped op=succeeded camp=stopped err=
+[   225s] status=stopped op=succeeded var=1 camp=stopped media=restored stats=post_stop_unallocated views=700 synced=2026-10-02T18:19:04.173986Z err=
+[   225s] ИТОГ ПРИЛОЖЕНИЯ: {
+ "status": "stopped",
+ "operation_state": "succeeded",
+ "campaign_state": "stopped",
+ "media_status": "restored",
+ "stats_quality": "post_stop_unallocated",
+ "winner_variant_order": null,
+ "winner_decision": "test_interrupted",
+ "total_views": 700,
+ "total_clicks": 42,
+ "unallocated_views": 0,
+ "unallocated_clicks": 0,
+ "last_error": null
+}
+[   225s]   вариант 1 (card): показы=700 клики=42 CTR=None точность=None победитель=False
+[   225s]   вариант 2 (upload): показы=0 клики=0 CTR=None точность=None победитель=False
+[   225s] ДОП. ПОЛЯ: {
+ "keep_winner_as_main": false,
+ "winner_variant_order": null,
+ "winner_decision": "test_interrupted",
+ "winner_p_value": null,
+ "winner_confidence": 0.95,
+ "winner_worst_case_safe": null,
+ "stats_reconciliation_status": "settled",
+ "stats_reconciliation_elapsed_sec": 30,
+ "stats_reconciliation_stable_snapshots": 2,
+ "similar_variant_positions": []
+}
+[   225s] ПРАВДА WB: карточка 3105 ['ORIG', 'P2', 'P3', 'P4']
+[   225s] ПРАВДА WB: кампании {"1196901": {"status": 11, "budget": 1500.0, "spent": 210.0, "views": 700, "clicks": 42, "by_label": {"P3": {"views": 700, "clicks": 42, "spent": 210.0}}}}
+[   225s] ПРАВДА WB: пополнения [(1196901, 1500)]

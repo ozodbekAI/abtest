@@ -98,6 +98,7 @@ class ABTestResponse(BaseModel):
     stats_reconciliation_status: str | None = None
     stats_reconciliation_elapsed_sec: int = 0
     stats_reconciliation_stable_snapshots: int = 0
+    similar_variant_positions: list[int] = Field(default_factory=list)
     operation_state: str = "ready"
     campaign_state: str = "not_created"
     media_status: str = "original"

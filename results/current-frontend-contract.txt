@@ -1,0 +1,10 @@
+PASS: API start requires draft_fingerprint
+PASS: ABTest exposes start_confirmation_fingerprint
+PASS: Wizard sends draft_fingerprint
+PASS: CPM retry sends fresh fingerprint
+PASS: Existing campaign resume sends reviewed snapshot fingerprint
+PASS: Similar-media warning is exposed by ABTest
+PASS: Similar-media warning requires explicit paid-start confirmation
+PASS: Draft creation sends the calculated budget
+PASS: Minimum budget is loaded from server config
+PASS: Resume preserves reviewed funding source and forbids new deposit

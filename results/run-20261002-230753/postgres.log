@@ -1,0 +1,14 @@
+2026-10-02 23:07:54.602 +05 [489432] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-10-02 23:07:54.602 +05 [489432] LOG:  listening on IPv4 address "127.0.0.1", port 55439
+2026-10-02 23:07:54.609 +05 [489432] LOG:  listening on Unix socket "/tmp/abtest-audit-jilk5acu/.s.PGSQL.55439"
+2026-10-02 23:07:54.617 +05 [489435] LOG:  database system was shut down at 2026-10-02 23:07:53 +05
+2026-10-02 23:07:54.625 +05 [489432] LOG:  database system is ready to accept connections
+2026-10-02 23:09:51.186 +05 [493013] FATAL:  database "audit_restore_retry" does not exist
+2026-10-02 23:09:51.216 +05 [493015] FATAL:  database "audit_restore_retry" does not exist
+2026-10-02 23:12:20.532 +05 [489432] LOG:  received fast shutdown request
+2026-10-02 23:12:20.539 +05 [489432] LOG:  aborting any active transactions
+2026-10-02 23:12:20.541 +05 [489432] LOG:  background worker "logical replication launcher" (PID 489438) exited with exit code 1
+2026-10-02 23:12:20.542 +05 [489433] LOG:  shutting down
+2026-10-02 23:12:20.545 +05 [489433] LOG:  checkpoint starting: shutdown immediate
+2026-10-02 23:12:21.083 +05 [489433] LOG:  checkpoint complete: wrote 1180 buffers (7.2%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.020 s, sync=0.501 s, total=0.541 s; sync files=499, longest=0.004 s, average=0.002 s; distance=5507 kB, estimate=5507 kB; lsn=0/1A54658, redo lsn=0/1A54658
+2026-10-02 23:12:21.091 +05 [489432] LOG:  database system is shut down

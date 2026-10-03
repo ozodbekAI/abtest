@@ -1,0 +1,202 @@
+[     0s] ### F01: Штатный тест: P3 (6 %) против UPL (3 %), по 1000 показов. Сравнить цифры с правдой, посмотреть решение о победителе.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 117, in F01
+    u, conn, tid = setup_test("f01", nm, views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F02: Поздние клики: 40 % кликов приходят на 20 мин позже (дольше окна сверки). P3 против UPL.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 127, in F02
+    u, conn, tid = setup_test("f02", nm, views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F03: Похожее фото при переходе A → B: вариант 1 = P3, вариант 2 = P3S (P3 + плашка, pHash 6).
+    Перед переходом WB начинает игнорировать запись ТОЛЬКО главного слота 1. Ожидается: B не объявлен
+    установленным, реклама не идёт на старом фото под видом B.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 138, in F03
+    u, conn, tid = setup_test("f03", nm, variants=(("card", 3), ("upload", "P3S")), views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F04: Пауза не подтверждается (регресс).
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 154, in F04
+    u, conn, tid = setup_test("f04", nm, views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F05: «Стоп» во время сверки статистики: время ответа и что происходит дальше.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 164, in F05
+    u, conn, tid = setup_test("f05", nm, views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F06: Высокий трафик 600/мин при задержке статистики 4 мин: хватает ли бюджета на второй этап,
+    сохраняются ли данные второго этапа при прерывании.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 186, in F06
+    u, conn, tid = setup_test("f06", nm, views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F07: Длинный этап 3000 показов: как часто планировщик обновляет этот тест, пока другие ждут фото и сверяют статистику.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 195, in F07
+    u, conn, tid = setup_test("f07", nm, views_per_variant=3000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F08: Два пользователя, один магазин, одна карточка (регресс).
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 209, in F08
+    u1, c1, t1 = setup_test("f08a", nm, views_per_variant=1000)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+
+[     0s] ### F09: Медленный старт: WB не применяет фото варианта 1 (все слоты). Проверка, что это не тормозит другие тесты,
+    и что реклама не запускается.
+[     0s] СЦЕНАРИЙ УПАЛ: FileNotFoundError(2, 'No such file or directory')
+[     0s] Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 243, in run
+    fn(log)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 222, in F09
+    u, conn, tid = setup_test("f09", nm, variants=(("upload", "ORIGS"), ("card", 3)), views_per_variant=1000)
+                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/rr2.py", line 89, in setup_test
+    u = User(f"{tag}-{uuid.uuid4().hex[:8]}@example.com").register()
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py", line 53, in register
+    log = (RUN / "backend.log").read_text(errors="ignore")
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1029, in read_text
+    with self.open(mode='r', encoding=encoding, errors=errors) as f:
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/pathlib.py", line 1015, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+FileNotFoundError: [Errno 2] No such file or directory: '/tmp/claude-0/-home-claude/73b304ac-d90f-5d27-9dc9-48112979fca3/scratchpad/e2e4/backend.log'
+

@@ -1,0 +1,13 @@
+
+> wb-optimizer-web@0.1.0 build
+> tsc -b && vite build
+
+vite v6.4.3 building for production...
+transforming...
+✓ 1663 modules transformed.
+rendering chunks...
+computing gzip size...
+dist/index.html                   0.46 kB │ gzip:   0.29 kB
+dist/assets/index-BhdvoelL.css  117.99 kB │ gzip:  23.05 kB
+dist/assets/index-DTeuWHEJ.js   456.86 kB │ gzip: 130.77 kB
+✓ built in 1.31s

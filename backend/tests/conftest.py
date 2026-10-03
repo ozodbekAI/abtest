@@ -15,6 +15,8 @@ if 'app.core.database' not in sys.modules:
             raise RuntimeError('DB factory is intentionally unavailable in deterministic unit tests')
     stub.Base = Base
     stub.AsyncSessionLocal = DummySessionFactory()
+    stub.OperationLockSessionLocal = DummySessionFactory()
+    stub.StatsLockSessionLocal = DummySessionFactory()
     stub.engine = None
     stub.get_db = None
     sys.modules['app.core.database'] = stub

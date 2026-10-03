@@ -530,6 +530,18 @@ function CreateTestModal({ connection, abConfig, onClose, onCreated }: { connect
         createdTest = test;
       }
       if (test.budget_rub !== startConfirmation.requiredBudget || test.cpm_rub !== startConfirmation.cpm || test.views_per_variant !== startConfirmation.views) throw new Error('Серверный расчёт отличается от подтверждённых условий. Запуск не отправлен; проверьте черновик.');
+      const similarPositions = test.similar_variant_positions || [];
+      if (similarPositions.length > 0) {
+        const positionsText = similarPositions.join(', ');
+        const confirmed = window.confirm(
+          `Варианты ${positionsText} похожи на уже используемые изображения. Они не являются точной копией, но результат теста может быть менее выразительным. Продолжить платный запуск?`
+        );
+        if (!confirmed) {
+          toast.info('Запуск отменён. Черновик теста сохранён для изменения изображений.');
+          onCreated(test);
+          return;
+        }
+      }
       test = await api.startABTest(test.id, { auto_deposit: startConfirmation.autoDeposit, deposit_rub: startConfirmation.autoDeposit ? startConfirmation.requiredBudget : undefined, funding_source: startConfirmation.autoDeposit ? fundingSource : 'auto', draft_fingerprint: test.start_confirmation_fingerprint }, newOperationKey(test.id));
       toast.success('A/B-тест запущен');
       onCreated(test);

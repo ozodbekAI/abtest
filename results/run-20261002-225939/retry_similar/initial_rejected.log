@@ -1,0 +1,49 @@
+WB VERIFY STILL OLD IMAGE test_id=1 nm_id=92000 slot=1 attempt=1 previous_sha=107adc9650b4617bb80c0c15eae129daa024d7a3d993e2658d33551b4ce3bf67
+WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=1 attempt=1 distance=6
+WB VERIFY STILL OLD IMAGE test_id=1 nm_id=92000 slot=1 attempt=2 previous_sha=107adc9650b4617bb80c0c15eae129daa024d7a3d993e2658d33551b4ce3bf67
+WB VERIFY HASH MISMATCH test_id=1 nm_id=92000 slot=1 attempt=2 distance=6
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/tmp/abtest-final-20260930/ABTEST-final-obe-proverki-20260930/first-review/harness-images/tick.py", line 7, in main
+    await ABTestService(db).scheduler_tick()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6528, in scheduler_tick
+    await asyncio.gather(*(run_one(user_id, test_id, safety) for user_id, test_id, safety in jobs))
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6519, in run_one
+    await execute()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6497, in execute
+    await asyncio.wait_for(action(candidate, asyncio.Semaphore(1)), timeout_seconds)
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6278, in _scheduler_sync_one
+    await self._sync_loaded(locked_test)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6044, in _sync_loaded
+    await self._apply_variant(
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 2077, in _apply_variant
+    await self._apply_variant_with_slot_swap(
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 2947, in _apply_variant_with_slot_swap
+    verified = await self._verify_uploaded_image(
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 2362, in _verify_uploaded_image
+    await asyncio.sleep(delay_seconds)
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 665, in sleep
+    return await future
+           ^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/abtest-final-20260930/ABTEST-final-obe-proverki-20260930/first-review/harness-images/tick.py", line 8, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt

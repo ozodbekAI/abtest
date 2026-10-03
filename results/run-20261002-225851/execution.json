@@ -1,0 +1,7 @@
+{
+  "retry_similar": {
+    "passed": false,
+    "error": "HTTPStatusError(\"Client error '404 Not Found' for url 'http://127.0.0.1:18901/_ctl/similar_fixture'\\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404\")",
+    "traceback": "Traceback (most recent call last):\n  File \"/tmp/current_run_images_focused.py\", line 435, in <module>\n    globals()[name]()\n  File \"/tmp/current_run_images_focused.py\", line 402, in retry_similar\n    select_similar_fixture('P3')\n  File \"/tmp/current_run_images_focused.py\", line 366, in select_similar_fixture\n    e.mock('/_ctl/similar_fixture', {'base': base})\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/sergey-e2e/e2e_lib.py\", line 20, in mock\n    r.raise_for_status()\n  File \"/home/ozodbek/AVEMOD_PROJECTS/abtest/venv/lib/python3.12/site-packages/httpx/_models.py\", line 829, in raise_for_status\n    raise HTTPStatusError(message, request=request, response=self)\nhttpx.HTTPStatusError: Client error '404 Not Found' for url 'http://127.0.0.1:18901/_ctl/similar_fixture'\nFor more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/404\n"
+  }
+}

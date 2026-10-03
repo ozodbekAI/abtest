@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models.ab_test import ABTest, ABTestAuditEvent, ABTestBudgetEntry, ABTestIncidentNotification, ABTestOperation, ABTestStatus, ABTestVariant
+from app.models.ab_test import ABTest, ABTestAuditEvent, ABTestBudgetEntry, ABTestIncidentNotification, ABTestOperation, ABTestStatus, ABTestOperationStatus, ABTestVariant
 from app.models.user import User
 from app.models.wb_connection import WBConnection
 
@@ -78,8 +78,19 @@ class ABTestRepository:
             .where(
                 ABTest.status != ABTestStatus.RUNNING,
                 ABTest.wb_campaign_id.isnot(None),
-                ABTest.campaign_state.in_(
-                    ["running", "starting", "unknown", "pause_requested", "stop_requested", "created", "paused"]
+                (
+                    ABTest.campaign_state.in_(
+                        ["running", "starting", "unknown", "pause_requested", "stop_requested", "created", "paused"]
+                    )
+                    | (
+                        (ABTest.status == ABTestStatus.FAILED)
+                        & (ABTest.operation_state == ABTestOperationStatus.RECONCILIATION_REQUIRED.value)
+                        & (ABTest.media_status != "restored")
+                    )
+                    | (
+                        (ABTest.status == ABTestStatus.STOPPED)
+                        & (ABTest.operation_state == "post_stop_reconciliation")
+                    )
                 ),
             )
             .order_by(ABTest.id)

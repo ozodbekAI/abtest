@@ -1,0 +1,38 @@
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/tmp/current-harness-images/tick.py", line 7, in main
+    await ABTestService(db).scheduler_tick()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6528, in scheduler_tick
+    await asyncio.gather(*(run_one(user_id, test_id, safety) for user_id, test_id, safety in jobs))
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6519, in run_one
+    await execute()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6494, in execute
+    await asyncio.wait_for(service._post_stop_reconcile(candidate, promotion), timeout_seconds)
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 4768, in _post_stop_reconcile
+    await self._settle_stage_stats(test, promotion, post_stop=True)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 1089, in _settle_stage_stats
+    await asyncio.sleep(min(float(poll), remaining))
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 665, in sleep
+    return await future
+           ^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/current-harness-images/tick.py", line 8, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt

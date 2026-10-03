@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     ab_test_stats_transition_window_sec: int = 180  # first 3 minutes of a new stage stay unallocated
     ab_test_winner_confidence: float = 0.95
     ab_test_budget_guard_reserve_rub: int = 300
+    ab_test_budget_guard_pending_lag_sec: int = 300  # reserve up to 5 min of delayed provider spend
     ab_test_scheduler_per_test_timeout_sec: int = 2400
     ab_test_scheduler_concurrency: int = 4
     ab_test_max_budget_rub: int = 1_000_000_000

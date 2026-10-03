@@ -225,6 +225,7 @@ export type ABTest = {
   stats_reconciliation_status?: string | null;
   stats_reconciliation_elapsed_sec?: number;
   stats_reconciliation_stable_snapshots?: number;
+  similar_variant_positions?: number[];
   operation_state: string;
   campaign_state: string;
   media_status: string;

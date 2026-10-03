@@ -1,0 +1,63 @@
+Traceback (most recent call last):
+  File "/usr/lib/python3.12/asyncio/runners.py", line 118, in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/base_events.py", line 687, in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+  File "/tmp/current-harness-images/tick.py", line 7, in main
+    await ABTestService(db).scheduler_tick()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6528, in scheduler_tick
+    await asyncio.gather(*(run_one(user_id, test_id, safety) for user_id, test_id, safety in jobs))
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6519, in run_one
+    await execute()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 6494, in execute
+    await asyncio.wait_for(service._post_stop_reconcile(candidate, promotion), timeout_seconds)
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 520, in wait_for
+    return await fut
+           ^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 4768, in _post_stop_reconcile
+    await self._settle_stage_stats(test, promotion, post_stop=True)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 1022, in _settle_stage_stats
+    async with self._stats_operation_lock(test.connection_id):
+  File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/ab_test_service.py", line 648, in _stats_operation_lock
+    async with WBRateLimiter.stats_lock(self.db, connection_id):
+  File "/usr/lib/python3.12/contextlib.py", line 210, in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/backend/app/services/wb_rate_limiter.py", line 172, in stats_lock
+    await asyncio.sleep(wait_for)
+  File "/usr/lib/python3.12/asyncio/tasks.py", line 665, in sleep
+    return await future
+           ^^^^^^^^^^^^
+asyncio.exceptions.CancelledError
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/tmp/current-harness-images/tick.py", line 8, in <module>
+    asyncio.run(main())
+  File "/usr/lib/python3.12/asyncio/runners.py", line 194, in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/asyncio/runners.py", line 123, in run
+    raise KeyboardInterrupt()
+KeyboardInterrupt
+Exception terminating connection <AdaptedConnection <asyncpg.connection.Connection object at 0x739abb7f36b0>>
+Traceback (most recent call last):
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/venv/lib/python3.12/site-packages/sqlalchemy/pool/base.py", line 374, in _close_connection
+    self._dialect.do_terminate(connection)
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/venv/lib/python3.12/site-packages/sqlalchemy/dialects/postgresql/asyncpg.py", line 1130, in do_terminate
+    dbapi_connection.terminate()
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/venv/lib/python3.12/site-packages/sqlalchemy/dialects/postgresql/asyncpg.py", line 901, in terminate
+    if util.concurrency.in_greenlet():
+       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ozodbek/AVEMOD_PROJECTS/abtest/venv/lib/python3.12/site-packages/sqlalchemy/util/_concurrency_py3k.py", line 105, in in_greenlet
+    current = getcurrent()
+              ^^^^^^^^^^^^
+RuntimeError: greenlet is being finalized
+The garbage collector is trying to clean up non-checked-in connection <AdaptedConnection <asyncpg.connection.Connection object at 0x739abb7f36b0>>, which will be terminated.  Please ensure that SQLAlchemy pooled connections are returned to the pool explicitly, either by calling ``close()`` or by using appropriate context managers to manage their lifecycle.
+sys:1: SAWarning: The garbage collector is trying to clean up non-checked-in connection <AdaptedConnection <asyncpg.connection.Connection object at 0x739abb7f36b0>>, which will be terminated.  Please ensure that SQLAlchemy pooled connections are returned to the pool explicitly, either by calling ``close()`` or by using appropriate context managers to manage their lifecycle.

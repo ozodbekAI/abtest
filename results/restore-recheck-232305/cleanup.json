@@ -1,0 +1,13 @@
+{
+  "processes": [
+    {
+      "pid": 517716,
+      "returncode": -15
+    },
+    {
+      "pid": 517774,
+      "returncode": -15
+    }
+  ],
+  "postgres_stopped": true
+}

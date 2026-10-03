@@ -1,0 +1,34 @@
+{
+  "date": "2026-10-02",
+  "source": "ABTEST-final-obe-proverki-20260930.zip criteria",
+  "backend_unit": "119 passed",
+  "compileall": "passed",
+  "frontend_build": "passed",
+  "frontend_contract": "10/10 passed",
+  "acceptance_cases": {
+    "control": true,
+    "stale_confirmation": true,
+    "overlap": true,
+    "repeat_start": true,
+    "pause_failure": true,
+    "external_edit": true,
+    "retry_photo": true,
+    "retry_similar": true,
+    "restore_retry_after_outage": true,
+    "F05_stop_reconcile": true,
+    "F08_same_store_card_conflict": true
+  },
+  "stats_probes": {
+    "delayed_clicks": true,
+    "transition_accumulation": true,
+    "third_variant": true,
+    "earlier_unstable": true,
+    "resume_deadline": true
+  },
+  "open_product_decision": [
+    "winner selection requires provider photo-level attribution; aggregate-only WB fullstats remains fail-closed as statistics_not_attributable"
+  ],
+  "not_fullly_replayed": [
+    "long F01/F02/F06/F07/F09 production-duration scenarios and 15-20 concurrent live-WB run"
+  ]
+}

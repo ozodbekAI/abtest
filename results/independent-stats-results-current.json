@@ -1,0 +1,774 @@
+{
+  "method": "Real product methods with stubbed WB/storage and advancing virtual clock; default 180/600/1800/3 parameters",
+  "cases": {
+    "delayed_clicks": {
+      "scenario": "Late A clicks arrive after B transition window",
+      "truth": {
+        "A": {
+          "views": 2000,
+          "clicks": 100
+        },
+        "B": {
+          "views": 2000,
+          "clicks": 50
+        }
+      },
+      "after_A": {
+        "winner": null,
+        "decision": "insufficient_data",
+        "stats_quality": "stage_estimated",
+        "variants": [
+          {
+            "position": 1,
+            "views": 2000,
+            "clicks": 0,
+            "ctr": 0.0
+          },
+          {
+            "position": 2,
+            "views": 0,
+            "clicks": 0,
+            "ctr": 0.0
+          }
+        ],
+        "unallocated_views": 0,
+        "unallocated_clicks": 0,
+        "total_views": 2000,
+        "total_clicks": 0,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2
+          ],
+          "stats_reconciliation": {
+            "status": "settled",
+            "stage_variant_position": 1,
+            "started_at": "2026-09-27T21:30:00+00:00",
+            "elapsed_sec": 720.0,
+            "stable_snapshots": 5,
+            "last_snapshot": {
+              "views": 2000,
+              "clicks": 0,
+              "orders": 0,
+              "spend": 200.0
+            },
+            "post_stop": false,
+            "completed_at": "2026-09-27T21:42:00+00:00"
+          },
+          "variant_attribution": {
+            "1": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 2000,
+              "last_stage_clicks": 0,
+              "last_stage_spend_rub": 200.0,
+              "partial": false,
+              "reconciled_after_sec": 720.0
+            }
+          },
+          "stats_correction_history": [
+            {
+              "at": "2026-09-27T21:42:00+00:00",
+              "variant_position": 1,
+              "status": "settled",
+              "baseline": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "final": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "stage_delta": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "attributed": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 5,
+              "elapsed_sec": 720.0
+            }
+          ]
+        }
+      },
+      "actual": {
+        "winner": null,
+        "decision": "statistics_not_attributable",
+        "stats_quality": "stage_estimated",
+        "variants": [
+          {
+            "position": 1,
+            "views": 2000,
+            "clicks": 0,
+            "ctr": 0.0
+          },
+          {
+            "position": 2,
+            "views": 2000,
+            "clicks": 150,
+            "ctr": 7.5
+          }
+        ],
+        "unallocated_views": 0,
+        "unallocated_clicks": 0,
+        "total_views": 4000,
+        "total_clicks": 150,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2
+          ],
+          "stats_reconciliation": {
+            "status": "settled",
+            "stage_variant_position": 2,
+            "started_at": "2026-09-27T21:46:00+00:00",
+            "elapsed_sec": 720.0,
+            "stable_snapshots": 5,
+            "last_snapshot": {
+              "views": 4000,
+              "clicks": 150,
+              "orders": 0,
+              "spend": 400.0
+            },
+            "post_stop": false,
+            "completed_at": "2026-09-27T21:58:00+00:00"
+          },
+          "variant_attribution": {
+            "1": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 2000,
+              "last_stage_clicks": 0,
+              "last_stage_spend_rub": 200.0,
+              "partial": false,
+              "reconciled_after_sec": 720.0
+            },
+            "2": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 2000,
+              "last_stage_clicks": 150,
+              "last_stage_spend_rub": 200.0,
+              "partial": false,
+              "reconciled_after_sec": 720.0
+            }
+          },
+          "stats_correction_history": [
+            {
+              "at": "2026-09-27T21:42:00+00:00",
+              "variant_position": 1,
+              "status": "settled",
+              "baseline": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "final": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "stage_delta": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "attributed": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 5,
+              "elapsed_sec": 720.0
+            },
+            {
+              "at": "2026-09-27T21:58:00+00:00",
+              "variant_position": 2,
+              "status": "settled",
+              "baseline": {
+                "views": 2000,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "final": {
+                "views": 4000,
+                "clicks": 150,
+                "orders": 0,
+                "spend_rub": 400.0
+              },
+              "stage_delta": {
+                "views": 2000,
+                "clicks": 150,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "attributed": {
+                "views": 2000,
+                "clicks": 150,
+                "orders": 0,
+                "spend_rub": 200.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 5,
+              "elapsed_sec": 720.0
+            }
+          ],
+          "budget_guard_sample": {
+            "at": "2026-09-27T21:46:00+00:00",
+            "views": 4000
+          }
+        }
+      },
+      "expected": "No certified B winner without attribution evidence or a justified bound on late data",
+      "safety_pass": true
+    },
+    "transition_accumulation": {
+      "scenario": "Two successive increments inside 180 second transition window",
+      "observed_increments": [
+        {
+          "views": 100,
+          "clicks": 10
+        },
+        {
+          "views": 100,
+          "clicks": 10
+        }
+      ],
+      "before_settlement": {
+        "verified_positions": [
+          1,
+          2
+        ],
+        "stats_transition": {
+          "variant_position": 1,
+          "unallocated_views": 200,
+          "unallocated_clicks": 20,
+          "unallocated_spend_rub": 20.0,
+          "last_observed_total_views": 200,
+          "last_observed_total_clicks": 20,
+          "last_observed_total_spend_rub": 20.0
+        },
+        "budget_guard_sample": {
+          "at": "2026-09-27T21:31:00+00:00",
+          "views": 200
+        }
+      },
+      "actual": {
+        "winner": null,
+        "decision": "insufficient_data",
+        "stats_quality": "stage_estimated",
+        "variants": [
+          {
+            "position": 1,
+            "views": 0,
+            "clicks": 0,
+            "ctr": 0.0
+          },
+          {
+            "position": 2,
+            "views": 0,
+            "clicks": 0,
+            "ctr": 0.0
+          }
+        ],
+        "unallocated_views": 200,
+        "unallocated_clicks": 20,
+        "total_views": 200,
+        "total_clicks": 20,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2
+          ],
+          "budget_guard_sample": {
+            "at": "2026-09-27T21:31:00+00:00",
+            "views": 200
+          },
+          "stats_reconciliation": {
+            "status": "settled",
+            "stage_variant_position": 1,
+            "started_at": "2026-09-27T21:31:00+00:00",
+            "elapsed_sec": 720.0,
+            "stable_snapshots": 5,
+            "last_snapshot": {
+              "views": 200,
+              "clicks": 20,
+              "orders": 0,
+              "spend": 20.0
+            },
+            "post_stop": false,
+            "completed_at": "2026-09-27T21:43:00+00:00"
+          },
+          "variant_attribution": {
+            "1": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 0,
+              "last_stage_clicks": 0,
+              "last_stage_spend_rub": 0.0,
+              "partial": false,
+              "reconciled_after_sec": 720.0
+            }
+          },
+          "stats_correction_history": [
+            {
+              "at": "2026-09-27T21:43:00+00:00",
+              "variant_position": 1,
+              "status": "settled",
+              "baseline": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "final": {
+                "views": 200,
+                "clicks": 20,
+                "orders": 0,
+                "spend_rub": 20.0
+              },
+              "stage_delta": {
+                "views": 200,
+                "clicks": 20,
+                "orders": 0,
+                "spend_rub": 20.0
+              },
+              "attributed": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "unallocated_transition": {
+                "views": 200,
+                "clicks": 20,
+                "spend_rub": 20.0
+              },
+              "stable_snapshots": 5,
+              "elapsed_sec": 720.0
+            }
+          ]
+        }
+      },
+      "expected": "All 200 views and 20 clicks in the transition window remain unallocated",
+      "safety_pass": true
+    },
+    "third_variant": {
+      "scenario": "Three variants and uncertainty that can change the winner",
+      "actual": {
+        "winner": null,
+        "decision": "attribution_uncertainty",
+        "stats_quality": "stage_attributed",
+        "variants": [
+          {
+            "position": 1,
+            "views": 10000,
+            "clicks": 1000,
+            "ctr": 10.0
+          },
+          {
+            "position": 2,
+            "views": 10000,
+            "clicks": 500,
+            "ctr": 5.0
+          },
+          {
+            "position": 3,
+            "views": 300,
+            "clicks": 12,
+            "ctr": 4.0
+          }
+        ],
+        "unallocated_views": 1000,
+        "unallocated_clicks": 100,
+        "total_views": 21300,
+        "total_clicks": 1612,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2,
+            3
+          ],
+          "stats_reconciliation": {
+            "status": "settled"
+          }
+        }
+      },
+      "feasible_assignment": "100 unknown views and all 100 clicks belong to C; other 900 views to A: C=112/400=28%, A=1000/10900=9.17%",
+      "expected": "No winner: stress uncertainty against every other variant, including C",
+      "safety_pass": true
+    },
+    "earlier_unstable": {
+      "scenario": "A exceeded 30 minute stability deadline; B later settles",
+      "after_A": {
+        "winner": null,
+        "decision": "data_unstable",
+        "stats_quality": "data_unstable",
+        "variants": [
+          {
+            "position": 1,
+            "views": 11000,
+            "clicks": 2200,
+            "ctr": 20.0
+          },
+          {
+            "position": 2,
+            "views": 0,
+            "clicks": 0,
+            "ctr": 0.0
+          }
+        ],
+        "unallocated_views": 0,
+        "unallocated_clicks": 0,
+        "total_views": 11000,
+        "total_clicks": 2200,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2
+          ],
+          "stats_reconciliation": {
+            "status": "data_unstable",
+            "stage_variant_position": 1,
+            "started_at": "2026-09-27T21:30:00+00:00",
+            "elapsed_sec": 1800.0,
+            "stable_snapshots": 1,
+            "last_snapshot": {
+              "views": 11000,
+              "clicks": 2200,
+              "orders": 0,
+              "spend": 1100.0
+            },
+            "post_stop": false,
+            "reason": "max_wait_exceeded",
+            "completed_at": "2026-09-27T22:00:00+00:00"
+          },
+          "variant_attribution": {
+            "1": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 11000,
+              "last_stage_clicks": 2200,
+              "last_stage_spend_rub": 1100.0,
+              "partial": false,
+              "reconciled_after_sec": 1800.0
+            }
+          },
+          "unresolved_stats_stages": [
+            {
+              "variant_position": 1,
+              "reason": "max_wait_exceeded",
+              "at": "2026-09-27T22:00:00+00:00"
+            }
+          ],
+          "stats_correction_history": [
+            {
+              "at": "2026-09-27T22:00:00+00:00",
+              "variant_position": 1,
+              "status": "data_unstable",
+              "baseline": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "final": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "stage_delta": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "attributed": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 1,
+              "elapsed_sec": 1800.0
+            }
+          ]
+        }
+      },
+      "actual": {
+        "winner": null,
+        "decision": "attribution_uncertainty",
+        "stats_quality": "stage_estimated",
+        "variants": [
+          {
+            "position": 1,
+            "views": 11000,
+            "clicks": 2200,
+            "ctr": 20.0
+          },
+          {
+            "position": 2,
+            "views": 11000,
+            "clicks": 220,
+            "ctr": 2.0
+          }
+        ],
+        "unallocated_views": 0,
+        "unallocated_clicks": 0,
+        "total_views": 22000,
+        "total_clicks": 2420,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2
+          ],
+          "stats_reconciliation": {
+            "status": "settled",
+            "stage_variant_position": 2,
+            "started_at": "2026-09-27T22:00:00+00:00",
+            "elapsed_sec": 720.0,
+            "stable_snapshots": 5,
+            "last_snapshot": {
+              "views": 22000,
+              "clicks": 2420,
+              "orders": 0,
+              "spend": 2200.0
+            },
+            "post_stop": false,
+            "completed_at": "2026-09-27T22:12:00+00:00"
+          },
+          "variant_attribution": {
+            "1": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 11000,
+              "last_stage_clicks": 2200,
+              "last_stage_spend_rub": 1100.0,
+              "partial": false,
+              "reconciled_after_sec": 1800.0
+            },
+            "2": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 11000,
+              "last_stage_clicks": 220,
+              "last_stage_spend_rub": 1100.0,
+              "partial": false,
+              "reconciled_after_sec": 720.0
+            }
+          },
+          "unresolved_stats_stages": [
+            {
+              "variant_position": 1,
+              "reason": "max_wait_exceeded",
+              "at": "2026-09-27T22:00:00+00:00"
+            }
+          ],
+          "stats_correction_history": [
+            {
+              "at": "2026-09-27T22:00:00+00:00",
+              "variant_position": 1,
+              "status": "data_unstable",
+              "baseline": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "final": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "stage_delta": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "attributed": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 1,
+              "elapsed_sec": 1800.0
+            },
+            {
+              "at": "2026-09-27T22:12:00+00:00",
+              "variant_position": 2,
+              "status": "settled",
+              "baseline": {
+                "views": 11000,
+                "clicks": 2200,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "final": {
+                "views": 22000,
+                "clicks": 2420,
+                "orders": 0,
+                "spend_rub": 2200.0
+              },
+              "stage_delta": {
+                "views": 11000,
+                "clicks": 220,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "attributed": {
+                "views": 11000,
+                "clicks": 220,
+                "orders": 0,
+                "spend_rub": 1100.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 5,
+              "elapsed_sec": 720.0
+            }
+          ]
+        }
+      },
+      "expected": "Earlier unresolved A uncertainty must still block winner unless actually reconciled",
+      "safety_pass": true
+    },
+    "resume_deadline": {
+      "scenario": "Worker resumes after 29 minutes already spent reconciling",
+      "previous_elapsed_sec": 1740,
+      "additional_wait_sec": 0.0,
+      "total_elapsed_sec": 1740.0,
+      "actual": {
+        "winner": null,
+        "decision": "insufficient_data",
+        "stats_quality": "stage_estimated",
+        "variants": [
+          {
+            "position": 1,
+            "views": 1000,
+            "clicks": 10,
+            "ctr": 1.0
+          },
+          {
+            "position": 2,
+            "views": 0,
+            "clicks": 0,
+            "ctr": 0.0
+          }
+        ],
+        "unallocated_views": 0,
+        "unallocated_clicks": 0,
+        "total_views": 1000,
+        "total_clicks": 10,
+        "media_state": {
+          "verified_positions": [
+            1,
+            2
+          ],
+          "stats_reconciliation": {
+            "stage_variant_position": 1,
+            "status": "settled",
+            "started_at": "2026-09-27T21:01:00+00:00",
+            "elapsed_sec": 1740.0,
+            "stable_snapshots": 4,
+            "last_snapshot": {
+              "views": 1000,
+              "clicks": 10,
+              "orders": 0,
+              "spend": 100.0
+            },
+            "completed_at": "2026-09-27T21:30:00+00:00"
+          },
+          "variant_attribution": {
+            "1": {
+              "source": "stage_delta_estimate",
+              "last_stage_views": 1000,
+              "last_stage_clicks": 10,
+              "last_stage_spend_rub": 100.0,
+              "partial": false,
+              "reconciled_after_sec": 1740.0
+            }
+          },
+          "stats_correction_history": [
+            {
+              "at": "2026-09-27T21:30:00+00:00",
+              "variant_position": 1,
+              "status": "settled",
+              "baseline": {
+                "views": 0,
+                "clicks": 0,
+                "orders": 0,
+                "spend_rub": 0.0
+              },
+              "final": {
+                "views": 1000,
+                "clicks": 10,
+                "orders": 0,
+                "spend_rub": 100.0
+              },
+              "stage_delta": {
+                "views": 1000,
+                "clicks": 10,
+                "orders": 0,
+                "spend_rub": 100.0
+              },
+              "attributed": {
+                "views": 1000,
+                "clicks": 10,
+                "orders": 0,
+                "spend_rub": 100.0
+              },
+              "unallocated_transition": {
+                "views": 0,
+                "clicks": 0,
+                "spend_rub": 0.0
+              },
+              "stable_snapshots": 4,
+              "elapsed_sec": 1740.0
+            }
+          ]
+        }
+      },
+      "expected": "Honor elapsed time and original deadline across worker restart",
+      "safety_pass": true
+    }
+  }
+}

@@ -9,7 +9,7 @@ export function mediaStateLabel(value?: string | null) {
 }
 
 export function statsStateLabel(value?: string | null) {
-  return ({ not_started: 'Данные ещё не получены', preliminary: 'Предварительные данные', stage_attributed: 'Подтверждена разбивка по этапам', stage_estimated: 'Оценка по этапам с маркировкой точности', data_unstable: 'Данные неустойчивы', incomplete: 'Неполные данные', reconciliation_required: 'Требуется сверка статистики', aggregate_unverified: 'Агрегированные данные без подтверждённой разбивки по фото' } as Record<string, string>)[value || ''] || 'Качество данных не подтверждено';
+  return ({ not_started: 'Данные ещё не получены', preliminary: 'Предварительные данные', stage_attributed: 'Подтверждена разбивка по этапам', stage_estimated: 'Оценка по этапам с маркировкой точности', post_stop_unallocated: 'Поздние данные после остановки не распределены по фото', data_unstable: 'Данные неустойчивы', incomplete: 'Неполные данные', reconciliation_required: 'Требуется сверка статистики', aggregate_unverified: 'Агрегированные данные без подтверждённой разбивки по фото' } as Record<string, string>)[value || ''] || 'Качество данных не подтверждено';
 }
 
 export function safetyClosed(test: ABTest) {

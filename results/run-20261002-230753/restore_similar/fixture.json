@@ -1,0 +1,5 @@
+{
+  "base": "ORIG",
+  "method": "real JPEG files, real product pHash, CDN WebP quality 72",
+  "selective_failure": "only main-slot writes acknowledged without applying"
+}

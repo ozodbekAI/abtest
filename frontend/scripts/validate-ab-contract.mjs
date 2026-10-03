@@ -11,6 +11,8 @@ const checks = [
   ['Wizard sends draft_fingerprint', /draft_fingerprint:\s*(?:test|latest)\.start_confirmation_fingerprint/.test(wizard)],
   ['CPM retry sends fresh fingerprint', wizard.includes('latest.start_confirmation_fingerprint')],
   ['Existing campaign resume sends reviewed snapshot fingerprint', detail.includes('resumeConfirmation?.start_confirmation_fingerprint')],
+  ['Similar-media warning is exposed by ABTest', types.includes('similar_variant_positions?: number[]')],
+  ['Similar-media warning requires explicit paid-start confirmation', wizard.includes('window.confirm') && wizard.includes('similar_variant_positions')],
   ['Draft creation sends the calculated budget', wizard.includes('budget_rub: estimatedBudget')],
   ['Minimum budget is loaded from server config', wizard.includes('api.getABTestConfig()')],
   ['Resume preserves reviewed funding source and forbids new deposit', detail.includes('resumeConfirmation?.funding_source') && detail.includes('auto_deposit: false')],

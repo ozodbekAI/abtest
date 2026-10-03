@@ -1,0 +1,13 @@
+2026-10-02 23:12:45.110 +05 [498193] LOG:  starting PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit
+2026-10-02 23:12:45.110 +05 [498193] LOG:  listening on IPv4 address "127.0.0.1", port 55439
+2026-10-02 23:12:45.116 +05 [498193] LOG:  listening on Unix socket "/tmp/abtest-audit-q4a_1vkn/.s.PGSQL.55439"
+2026-10-02 23:12:45.125 +05 [498196] LOG:  database system was shut down at 2026-10-02 23:12:44 +05
+2026-10-02 23:12:45.133 +05 [498193] LOG:  database system is ready to accept connections
+2026-10-02 23:14:15.633 +05 [500587] LOG:  unexpected EOF on client connection with an open transaction
+2026-10-02 23:14:15.722 +05 [498193] LOG:  received fast shutdown request
+2026-10-02 23:14:15.726 +05 [498193] LOG:  aborting any active transactions
+2026-10-02 23:14:15.727 +05 [498193] LOG:  background worker "logical replication launcher" (PID 498199) exited with exit code 1
+2026-10-02 23:14:15.727 +05 [498194] LOG:  shutting down
+2026-10-02 23:14:15.730 +05 [498194] LOG:  checkpoint starting: shutdown immediate
+2026-10-02 23:14:16.257 +05 [498194] LOG:  checkpoint complete: wrote 1139 buffers (7.0%); 0 WAL file(s) added, 0 removed, 0 recycled; write=0.021 s, sync=0.491 s, total=0.530 s; sync files=490, longest=0.004 s, average=0.001 s; distance=5244 kB, estimate=5244 kB; lsn=0/1A12710, redo lsn=0/1A12710
+2026-10-02 23:14:16.265 +05 [498193] LOG:  database system is shut down

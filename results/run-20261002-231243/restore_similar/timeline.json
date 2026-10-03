@@ -1,0 +1,109 @@
+[
+  {
+    "action": "start",
+    "status": 409,
+    "body": {
+      "detail": {
+        "code": "confirmation_outdated",
+        "message": "Безопасный бюджет теста пересчитан. Подтвердите запуск с новой суммой.",
+        "draft_fingerprint": "cd36b529baebc0c55ff8511c1378f9418caf0a7d2ddc7b12a327407865f26227",
+        "recalculated_budget": 1500
+      }
+    }
+  },
+  {
+    "action": "start_after_budget_reconfirmation",
+    "status": 200,
+    "body": {
+      "id": 1,
+      "connection_id": 1,
+      "store_name": "Synthetic S1",
+      "nm_id": 92000,
+      "title": "E2E 92000",
+      "status": "running",
+      "wb_campaign_id": 1176601,
+      "bid_type": "unified",
+      "skip_current_photo": true,
+      "keep_winner_as_main": false,
+      "delete_test_media": false,
+      "views_per_variant": 300,
+      "cpm_rub": 300,
+      "budget_rub": 1500,
+      "placement": "combined",
+      "current_variant_order": 1,
+      "winner_variant_order": null,
+      "winner_decision": null,
+      "winner_p_value": null,
+      "winner_confidence": 0.95,
+      "winner_worst_case_safe": null,
+      "stats_reconciliation_status": null,
+      "stats_reconciliation_elapsed_sec": 0,
+      "stats_reconciliation_stable_snapshots": 0,
+      "similar_variant_positions": [
+        1
+      ],
+      "operation_state": "succeeded",
+      "campaign_state": "running",
+      "media_status": "variant_applied",
+      "stats_quality": "preliminary",
+      "incident_id": null,
+      "unallocated_views": 0,
+      "unallocated_clicks": 0,
+      "unallocated_spend_rub": 0.0,
+      "funding_source": "account",
+      "stage_views": 0,
+      "stage_clicks": 0,
+      "stage_spend_rub": 0.0,
+      "total_views": 0,
+      "total_clicks": 0,
+      "total_spend_rub": 0.0,
+      "total_ctr": null,
+      "total_orders": 0,
+      "total_cpo": null,
+      "last_error": null,
+      "started_at": "2026-10-02T18:13:53.139823Z",
+      "finished_at": null,
+      "last_synced_at": null,
+      "created_at": "2026-10-02T18:12:49.068330Z",
+      "draft_fingerprint": "cd36b529baebc0c55ff8511c1378f9418caf0a7d2ddc7b12a327407865f26227",
+      "start_confirmation_fingerprint": "cd36b529baebc0c55ff8511c1378f9418caf0a7d2ddc7b12a327407865f26227",
+      "stage_exposure_views": 0,
+      "variants": [
+        {
+          "id": 1,
+          "position": 1,
+          "source_type": "upload",
+          "file_name": "v.jpg",
+          "image_url": "/media/ab_tests/1/1_d3bb8f57f442f8583e13.jpg?expires=1790968433&signature=3c46da32c4a64211411f4065b5b5ba45a3e5dafc2bfcdd498c1d1a8998b0073c",
+          "source_url": null,
+          "wb_url": null,
+          "views": 0,
+          "clicks": 0,
+          "ctr": null,
+          "spend_rub": 0.0,
+          "is_winner": false,
+          "attribution_quality": "unverified",
+          "orders": 0,
+          "cpo": null
+        },
+        {
+          "id": 2,
+          "position": 2,
+          "source_type": "card",
+          "file_name": "Фото карточки 3",
+          "image_url": "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790964766898",
+          "source_url": "http://127.0.0.1:18901/cdn/92000/3.webp?v=1790964766898",
+          "wb_url": null,
+          "views": 0,
+          "clicks": 0,
+          "ctr": null,
+          "spend_rub": 0.0,
+          "is_winner": false,
+          "attribution_quality": "unverified",
+          "orders": 0,
+          "cpo": null
+        }
+      ]
+    }
+  }
+]

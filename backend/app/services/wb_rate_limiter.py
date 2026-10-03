@@ -10,7 +10,7 @@ from typing import AsyncIterator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import AsyncSessionLocal
+from app.core.database import AsyncSessionLocal, OperationLockSessionLocal, StatsLockSessionLocal
 
 
 class WBRateLimiter:
@@ -79,7 +79,7 @@ class WBRateLimiter:
                     # worker could then mutate the same card concurrently.
                     # Keep a dedicated DB session open and use a session-level
                     # advisory lock for the whole context instead.
-                    lock_db = AsyncSessionLocal()
+                    lock_db = OperationLockSessionLocal()
                     result = await lock_db.execute(
                         text("SELECT pg_advisory_lock(hashtext(:lock_key))" if wait else "SELECT pg_try_advisory_lock(hashtext(:lock_key))"),
                         {"lock_key": lock_key},
@@ -107,18 +107,19 @@ class WBRateLimiter:
     @classmethod
     @asynccontextmanager
     async def stats_lock(cls, db: AsyncSession, connection_id: int) -> AsyncIterator[None]:
-        """Reserve a fullstats slot across every worker process."""
+        """Reserve a fullstats slot without pinning the caller's QueuePool connection."""
         lock = await cls._lock_for(f"connection:{int(connection_id)}", 0)
         async with lock:
             wait_for = 0.0
+            lock_db: AsyncSession | None = None
             try:
                 bind = db.get_bind()
                 if bind.dialect.name == "postgresql":
-                    # Keep the caller's transaction lock alive while the
-                    # network request runs. Only the short reservation uses a
-                    # separate transaction because committing db here would
-                    # release the A/B row/advisory lock.
-                    await db.execute(
+                    # Keep the advisory transaction lock on a dedicated NullPool
+                    # connection. The caller's normal API session stays free
+                    # during provider-rate waits and network I/O.
+                    lock_db = StatsLockSessionLocal()
+                    await lock_db.execute(
                         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
                         {"lock_key": f"wb-fullstats:{int(connection_id)}"},
                     )
@@ -169,4 +170,9 @@ class WBRateLimiter:
                 pass
             if wait_for > 0:
                 await asyncio.sleep(wait_for)
-            yield
+            try:
+                yield
+            finally:
+                if lock_db is not None:
+                    await lock_db.rollback()
+                    await lock_db.close()
