@@ -17,6 +17,7 @@ if 'app.core.database' not in sys.modules:
     stub.AsyncSessionLocal = DummySessionFactory()
     stub.OperationLockSessionLocal = DummySessionFactory()
     stub.StatsLockSessionLocal = DummySessionFactory()
+    stub.RateLimitSessionLocal = DummySessionFactory()
     stub.engine = None
     stub.get_db = None
     sys.modules['app.core.database'] = stub

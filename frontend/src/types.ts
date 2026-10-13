@@ -61,6 +61,8 @@ export type DashboardStats = {
   spend_rub: number;
   orders: number;
   ctr: number | null;
+  ctr_confidence_min?: number | null;
+  ctr_confidence_max?: number | null;
   cpo_rub: number | null;
   completed_campaign_count: number;
   failed_campaign_count: number;
@@ -190,10 +192,15 @@ export type ABTestVariant = {
   image_url?: string | null;
   source_url?: string | null;
   wb_url?: string | null;
-  views: number;
-  clicks: number;
+  views: number | null;
+  clicks: number | null;
   orders: number;
   ctr: number | null;
+  ctr_confidence_min?: number | null;
+  ctr_confidence_max?: number | null;
+  ctr_range_min?: number | null;
+  ctr_range_max?: number | null;
+  ctr_uncertainty_pp?: number | null;
   cpo?: number | null;
   spend_rub: number;
   is_winner: boolean;
@@ -222,6 +229,9 @@ export type ABTest = {
   winner_p_value?: number | null;
   winner_confidence?: number;
   winner_worst_case_safe?: boolean | null;
+  comparison_reliability?: 'reliable' | 'within_error' | 'not_established' | string;
+  comparison_message?: string | null;
+  late_data_policy?: 'variant_attribution_confirmed' | 'aggregate_late_events_unallocated_no_winner' | string;
   stats_reconciliation_status?: string | null;
   stats_reconciliation_elapsed_sec?: number;
   stats_reconciliation_stable_snapshots?: number;

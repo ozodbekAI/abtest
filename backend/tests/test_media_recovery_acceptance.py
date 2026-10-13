@@ -83,3 +83,30 @@ async def test_restore_verification_failure_keeps_reconciliation_open(monkeypatc
     assert test.operation_state == ABTestOperationStatus.RECONCILIATION_REQUIRED.value
     assert test.incident_id.startswith("INC-")
     assert test.status == ABTestStatus.FAILED
+
+
+@pytest.mark.asyncio
+async def test_final_stop_drives_paused_campaign_to_terminal_status(monkeypatch):
+    """A non-serving pause is safe for media, but final STOP must end campaign."""
+    db = SimpleNamespace(commit=AsyncMock(), flush=AsyncMock())
+    service = ABTestService(db)
+    service._audit = AsyncMock()
+    statuses = iter([11, 7])
+    stop_calls = []
+
+    class FinalStopPromotion:
+        async def get_campaign_status(self, campaign_id, refresh=True):
+            return next(statuses)
+
+        async def stop_campaign(self, campaign_id):
+            stop_calls.append(campaign_id)
+
+    test = ABTest(
+        id=1, user_id=1, connection_id=1, nm_id=123, title="stop",
+        status=ABTestStatus.STOPPED, wb_campaign_id=777,
+        campaign_state="paused", operation_state="stop_requested",
+        media_status="restored", current_variant_order=1,
+    )
+    await service._stop_campaign_confirmed(test, FinalStopPromotion())
+    assert stop_calls == [777]
+    assert test.campaign_state == "stopped"

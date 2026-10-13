@@ -38,6 +38,9 @@ async def get_ab_test_config(current_user: User = Depends(get_current_user)):
         "minimum_budget_rub": MIN_TEST_BUDGET_RUB,
         "budget_step_rub": BUDGET_STEP_RUB,
         "budget_guard_reserve_rub": int(getattr(settings, "ab_test_budget_guard_reserve_rub", 300) or 300),
+        "budget_guard_max_views_per_min": int(getattr(settings, "ab_test_budget_guard_max_views_per_min", 600) or 600),
+        "budget_guard_pending_lag_sec": int(getattr(settings, "ab_test_budget_guard_pending_lag_sec", 300) or 300),
+        "start_concurrency": int(getattr(settings, "ab_test_start_concurrency", 4) or 4),
         "minimum_views_per_variant": 300,
         "max_variants": 5,
     }

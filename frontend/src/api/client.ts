@@ -180,7 +180,7 @@ export const api = {
     if (cursor?.nmID || cursor?.nmId) params.set('cursor_nm_id', String(cursor.nmID || cursor.nmId));
     return request<ABTestCardsPage>(`/ab-tests/cards?${params.toString()}`, { signal });
   },
-  getABTestConfig: () => request<{ minimum_budget_rub: number; budget_step_rub: number; budget_guard_reserve_rub: number; minimum_views_per_variant: number; max_variants: number }>('/ab-tests/config'),
+  getABTestConfig: () => request<{ minimum_budget_rub: number; budget_step_rub: number; budget_guard_reserve_rub: number; budget_guard_max_views_per_min?: number; budget_guard_pending_lag_sec?: number; start_concurrency?: number; minimum_views_per_variant: number; max_variants: number }>('/ab-tests/config'),
   getABTests: (connectionId?: number, status?: string) => {
     const params = new URLSearchParams();
     if (connectionId) params.set('connection_id', String(connectionId));

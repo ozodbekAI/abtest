@@ -10,7 +10,7 @@ from typing import AsyncIterator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.database import AsyncSessionLocal, OperationLockSessionLocal, StatsLockSessionLocal
+from app.core.database import OperationLockSessionLocal, RateLimitSessionLocal, StatsLockSessionLocal
 
 
 class WBRateLimiter:
@@ -46,6 +46,74 @@ class WBRateLimiter:
     async def _lock_for(cls, scope_key: str, resource_id: int) -> asyncio.Lock:
         async with cls._locks_guard:
             return cls._locks[(str(scope_key), int(resource_id))]
+
+    @classmethod
+    @asynccontextmanager
+    async def start_capacity_slot(
+        cls,
+        db: AsyncSession,
+        limit: int,
+        *,
+        wait: bool = False,
+    ) -> AsyncIterator[bool]:
+        """Reserve one start slot across every API worker.
+
+        PostgreSQL session advisory locks make the start-capacity gate shared by
+        uvicorn/gunicorn processes.  Lightweight unit-test sessions have no
+        database bind, so they use the same-process lock as a deterministic
+        fallback.
+        """
+        limit = max(int(limit or 1), 1)
+        try:
+            bind = db.get_bind()
+        except (AttributeError, RuntimeError):
+            bind = None
+        if bind is None or getattr(getattr(bind, "dialect", None), "name", None) != "postgresql":
+            lock = await cls._lock_for("start-capacity", 0)
+            if not wait and lock.locked():
+                yield False
+                return
+            async with lock:
+                yield True
+            return
+
+        lock_db: AsyncSession | None = None
+        lock_key: str | None = None
+        acquired = False
+        try:
+            lock_db = OperationLockSessionLocal()
+            # A non-blocking probe keeps the HTTP start endpoint fail-fast.  A
+            # caller that explicitly asks to wait gets a short retry loop while
+            # retaining the same cross-process slot semantics.
+            while True:
+                for slot in range(limit):
+                    candidate = f"wb-ab-test:start-slot:{slot}"
+                    result = await lock_db.execute(
+                        text("SELECT pg_try_advisory_lock(hashtext(:lock_key))"),
+                        {"lock_key": candidate},
+                    )
+                    if bool(result.scalar()):
+                        lock_key = candidate
+                        acquired = True
+                        break
+                if acquired or not wait:
+                    break
+                await asyncio.sleep(0.25)
+            yield acquired
+        finally:
+            if lock_db is not None:
+                try:
+                    if acquired and lock_key is not None:
+                        await lock_db.execute(
+                            text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
+                            {"lock_key": lock_key},
+                        )
+                    await lock_db.commit()
+                except Exception:
+                    await lock_db.rollback()
+                    raise
+                finally:
+                    await lock_db.close()
 
     @classmethod
     @asynccontextmanager
@@ -101,6 +169,16 @@ class WBRateLimiter:
                                 text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
                                 {"lock_key": lock_key},
                             )
+                        # ``assert_lock_owned`` and the unlock statement both
+                        # start a transaction on the dedicated session.  End
+                        # it explicitly before closing the NullPool session;
+                        # otherwise PostgreSQL can leave the advisory lock and
+                        # an idle transaction alive long enough to block the
+                        # next confirmation/retry of the same start.
+                        await lock_db.commit()
+                    except Exception:
+                        await lock_db.rollback()
+                        raise
                     finally:
                         await lock_db.close()
 
@@ -113,66 +191,71 @@ class WBRateLimiter:
             wait_for = 0.0
             lock_db: AsyncSession | None = None
             try:
-                bind = db.get_bind()
-                if bind.dialect.name == "postgresql":
-                    # Keep the advisory transaction lock on a dedicated NullPool
-                    # connection. The caller's normal API session stays free
-                    # during provider-rate waits and network I/O.
-                    lock_db = StatsLockSessionLocal()
-                    await lock_db.execute(
-                        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-                        {"lock_key": f"wb-fullstats:{int(connection_id)}"},
-                    )
-                    scope = f"fullstats:{int(connection_id)}"
-                    async with AsyncSessionLocal() as rate_db:
-                        await rate_db.execute(
-                            text(
-                                """
-                                INSERT INTO wb_api_rate_limits (scope, next_allowed_at)
-                                VALUES (:scope, clock_timestamp())
-                                ON CONFLICT (scope) DO NOTHING
-                                """
-                            ),
-                            {"scope": scope},
+                try:
+                    bind = db.get_bind()
+                    if bind.dialect.name == "postgresql":
+                        # Keep the advisory transaction lock on a dedicated NullPool
+                        # connection through the reservation wait and provider call.
+                        # The caller's normal API session stays free during both.
+                        lock_db = StatsLockSessionLocal()
+                        await lock_db.execute(
+                            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+                            {"lock_key": f"wb-fullstats:{int(connection_id)}"},
                         )
-                        next_allowed_at = await rate_db.scalar(
-                            text(
-                                """
-                                SELECT next_allowed_at
-                                FROM wb_api_rate_limits
-                                WHERE scope = :scope
-                                FOR UPDATE
-                                """
-                            ),
-                            {"scope": scope},
-                        )
-                        now = datetime.now(timezone.utc)
-                        if next_allowed_at is not None:
-                            if next_allowed_at.tzinfo is None:
-                                next_allowed_at = next_allowed_at.replace(tzinfo=timezone.utc)
-                            wait_for = max((next_allowed_at - now).total_seconds(), 0.0)
-                        reservation_base = now + timedelta(seconds=wait_for)
-                        await rate_db.execute(
-                            text(
-                                """
-                                UPDATE wb_api_rate_limits
-                                SET next_allowed_at = :next_allowed_at
-                                WHERE scope = :scope
-                                """
-                            ),
-                            {
-                                "scope": scope,
-                                "next_allowed_at": reservation_base + timedelta(seconds=cls.FULLSTATS_INTERVAL_SECONDS),
-                            },
-                        )
-                        await rate_db.commit()
-            except (AttributeError, RuntimeError):
-                pass
-            if wait_for > 0:
-                await asyncio.sleep(wait_for)
-            try:
+                        scope = f"fullstats:{int(connection_id)}"
+                        # This transaction is also deliberately outside the main
+                        # QueuePool. A concurrent load must leave connections
+                        # available for API reads and safety/STOP workers.
+                        async with RateLimitSessionLocal() as rate_db:
+                            await rate_db.execute(
+                                text(
+                                    """
+                                    INSERT INTO wb_api_rate_limits (scope, next_allowed_at)
+                                    VALUES (:scope, clock_timestamp())
+                                    ON CONFLICT (scope) DO NOTHING
+                                    """
+                                ),
+                                {"scope": scope},
+                            )
+                            next_allowed_at = await rate_db.scalar(
+                                text(
+                                    """
+                                    SELECT next_allowed_at
+                                    FROM wb_api_rate_limits
+                                    WHERE scope = :scope
+                                    FOR UPDATE
+                                    """
+                                ),
+                                {"scope": scope},
+                            )
+                            now = datetime.now(timezone.utc)
+                            if next_allowed_at is not None:
+                                if next_allowed_at.tzinfo is None:
+                                    next_allowed_at = next_allowed_at.replace(tzinfo=timezone.utc)
+                                wait_for = max((next_allowed_at - now).total_seconds(), 0.0)
+                            reservation_base = now + timedelta(seconds=wait_for)
+                            await rate_db.execute(
+                                text(
+                                    """
+                                    UPDATE wb_api_rate_limits
+                                    SET next_allowed_at = :next_allowed_at
+                                    WHERE scope = :scope
+                                    """
+                                ),
+                                {
+                                    "scope": scope,
+                                    "next_allowed_at": reservation_base + timedelta(seconds=cls.FULLSTATS_INTERVAL_SECONDS),
+                                },
+                            )
+                            await rate_db.commit()
+                except (AttributeError, RuntimeError):
+                    pass
+                if wait_for > 0:
+                    await asyncio.sleep(wait_for)
                 yield
             finally:
                 if lock_db is not None:
-                    await lock_db.rollback()
-                    await lock_db.close()
+                    try:
+                        await lock_db.rollback()
+                    finally:
+                        await lock_db.close()

@@ -33,7 +33,14 @@ from app.core.database import AsyncSessionLocal
 from app.models.ab_test import ABTest, ABTestAuditEvent, ABTestOperation, ABTestOperationStatus, ABTestStatus, ABTestVariant
 from app.repositories.ab_test_repository import ABTestRepository
 from app.schemas.ab_test import ABTestCreateRequest, ABTestStartRequest
-from app.services.ab_test_budget import DEFAULT_SAFETY_RESERVE_RUB, calculate_protected_budget, calculate_required_budget
+from app.services.ab_test_budget import (
+    DEFAULT_PROVIDER_LAG_SECONDS,
+    DEFAULT_SAFE_MAX_VIEWS_PER_MIN,
+    DEFAULT_SAFETY_RESERVE_RUB,
+    calculate_operational_budget,
+    calculate_protected_budget,
+    calculate_required_budget,
+)
 from app.services.wb_content_client import WBApiError, WBContentClient
 from app.services.wb_promotion_client import WBPromotionClient
 from app.services.wb_rate_limiter import WBRateLimiter
@@ -47,6 +54,10 @@ logger = logging.getLogger(__name__)
 # long-running reconciliation/image verification must not occupy a global
 # scheduler semaphore slot and delay unrelated tests.
 _SCHEDULER_TASKS: dict[tuple[int, int], asyncio.Task] = {}
+_STOP_REQUEST_TASKS: dict[tuple[int, int], asyncio.Task] = {}
+_POST_STOP_RECONCILE_TASKS: dict[tuple[int, int], asyncio.Task] = {}
+_START_GATE_LOCK = asyncio.Lock()
+_START_GATE_ACTIVE = 0
 
 
 class ABTestReconciliationRequired(RuntimeError):
@@ -103,6 +114,10 @@ class ABTestService:
     # deletion state: it is safe to regard it as non-serving, but it must
     # never be reused for a retry because WB cannot start it again.
     NON_ACTIVE_CAMPAIGN_STATUSES = {-1, 4, 7, 8, 11}
+    # A paused/non-serving campaign is safe for media inspection, but it is
+    # not the same as a campaign that has been finally stopped.  The final
+    # STOP path must drive statuses 4/11 to WB's terminal status 7.
+    FINAL_CAMPAIGN_STATUSES = {-1, 7}
     ACTIVE_CAMPAIGN_STATUSES = {9}
     RESUMABLE_CAMPAIGN_STATUSES = {4, 11}
     WINNER_MIN_VARIANTS = 2
@@ -221,11 +236,13 @@ class ABTestService:
         tested_variant_count += 0 if test.skip_current_photo else 1
         if tested_variant_count <= 0:
             return int(test.budget_rub or 0)
-        return calculate_protected_budget(
+        return calculate_operational_budget(
             tested_variant_count,
             test.views_per_variant,
             test.cpm_rub,
             getattr(settings, "ab_test_budget_guard_reserve_rub", DEFAULT_SAFETY_RESERVE_RUB),
+            max_views_per_min=getattr(settings, "ab_test_budget_guard_max_views_per_min", DEFAULT_SAFE_MAX_VIEWS_PER_MIN),
+            lag_seconds=getattr(settings, "ab_test_budget_guard_pending_lag_sec", DEFAULT_PROVIDER_LAG_SECONDS),
         )
 
     @classmethod
@@ -633,7 +650,35 @@ class ABTestService:
                 )
 
     @asynccontextmanager
-    async def _operation_lock(self, connection_id: int, nm_id: int, user_id: int | None = None, *, wait: bool = True):
+    async def _operation_lock(
+        self,
+        connection_id: int,
+        nm_id: int,
+        user_id: int | None = None,
+        *,
+        wait: bool = True,
+        operation_kind: str | None = None,
+    ):
+        if operation_kind == "start":
+            limit = max(int(getattr(settings, "ab_test_start_concurrency", 4) or 4), 1)
+            async with WBRateLimiter.start_capacity_slot(self.db, limit, wait=False) as start_acquired:
+                if not start_acquired:
+                    raise HTTPException(
+                        status_code=429,
+                        detail={
+                            "code": "start_capacity",
+                            "message": "Сейчас выполняется максимальное число запусков. Повторите запуск после освобождения очереди; внешняя кампания не создавалась.",
+                            "capacity": limit,
+                        },
+                    )
+                async with self._operation_lock_for_card(connection_id, nm_id, user_id, wait=wait) as acquired:
+                    yield acquired
+            return
+        async with self._operation_lock_for_card(connection_id, nm_id, user_id, wait=wait) as acquired:
+            yield acquired
+
+    @asynccontextmanager
+    async def _operation_lock_for_card(self, connection_id: int, nm_id: int, user_id: int | None, *, wait: bool):
         scope = None
         if user_id is not None:
             connection = await self.repository.get_connection(user_id, connection_id)
@@ -681,20 +726,43 @@ class ABTestService:
         return True
 
     async def _is_stop_requested(self, test: ABTest) -> bool:
-        """Read the stop flags from fresh DB columns, bypassing the ORM identity map."""
-        scalar = getattr(self.db, "scalar", None)
-        if not callable(scalar):
-            return test.operation_state == "stop_requested" or test.campaign_state == "stop_requested"
+        """Read the stop fence without pinning the worker's QueuePool slot.
+
+        A reconciliation worker polls this flag once per second while the
+        provider can take minutes to answer.  Running that read on the worker
+        session leaves it ``idle in transaction`` between polls and exhausts
+        the application pool under load.  A short-lived independent session
+        owns the read transaction and is closed before the next poll.
+        """
         try:
-            row = await self.db.execute(
-                select(ABTest.operation_state, ABTest.campaign_state).where(
-                    ABTest.id == test.id,
-                    ABTest.user_id == test.user_id,
+            async with AsyncSessionLocal() as check_db:
+                row = await check_db.execute(
+                    select(ABTest.operation_state, ABTest.campaign_state).where(
+                        ABTest.id == test.id,
+                        ABTest.user_id == test.user_id,
+                    )
                 )
-            )
-            values = row.one_or_none()
+                values = row.one_or_none()
+                # Explicit rollback is cheap and makes the release visible to
+                # PostgreSQL before the context manager closes the session.
+                await check_db.rollback()
         except (AttributeError, RuntimeError):
-            return test.operation_state == "stop_requested" or test.campaign_state == "stop_requested"
+            # Deterministic unit doubles do not provide AsyncSessionLocal.  The
+            # fallback is only for those doubles; production always uses the
+            # independent session above.
+            try:
+                row = await self.db.execute(
+                    select(ABTest.operation_state, ABTest.campaign_state).where(
+                        ABTest.id == test.id,
+                        ABTest.user_id == test.user_id,
+                    )
+                )
+                values = row.one_or_none()
+                rollback = getattr(self.db, "rollback", None)
+                if callable(rollback):
+                    await rollback()
+            except (AttributeError, RuntimeError):
+                return getattr(test, "operation_state", None) == "stop_requested" or getattr(test, "campaign_state", None) == "stop_requested"
         if values is None:
             return False
         operation_state, campaign_state = values
@@ -706,6 +774,43 @@ class ABTestService:
             await self.db.commit()
         except Exception:
             await self.db.rollback()
+
+    async def _sleep_reconciliation_interval(self, test: ABTest, seconds: float) -> None:
+        """Sleep between provider polls without making STOP wait a full poll interval.
+
+        The reconciliation timer is deliberately coarse (minutes in production),
+        but a final STOP is an operator action.  Check the durable stop fence in
+        short slices so a worker can leave its long wait and begin safe cleanup
+        within a second or two.  The database transaction is released before
+        the wait; this helper never pins the worker's QueuePool connection.
+        """
+        remaining = max(float(seconds), 0.0)
+        if remaining <= 0:
+            return
+        await self._release_db_before_wait()
+        while remaining > 0:
+            if await self._is_stop_requested(test):
+                test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                test.incident_id = test.incident_id or self._incident_id()
+                raise ABTestReconciliationRequired(
+                    "Остановка теста запрошена пользователем; сверка прервана безопасно.",
+                    incident_id=test.incident_id,
+                )
+            step = min(1.0, remaining)
+            await asyncio.sleep(step)
+            remaining -= step
+
+    async def _sleep_stop_aware(self, test: ABTest, seconds: float) -> bool:
+        """Sleep in short slices and return false when a durable STOP arrives."""
+        remaining = max(float(seconds), 0.0)
+        await self._release_db_before_wait()
+        while remaining > 0:
+            if await self._is_stop_requested(test):
+                return False
+            step = min(1.0, remaining)
+            await asyncio.sleep(step)
+            remaining -= step
+        return not await self._is_stop_requested(test)
 
     def _state_snapshot(self, test: ABTest) -> dict[str, object]:
         return {
@@ -928,6 +1033,122 @@ class ABTestService:
         alpha = max(min(1.0 - confidence, 0.5), 1e-6)
         return leader_p, runner_p, bool(p_value is not None and p_value < alpha and leader_p > runner_p)
 
+    @staticmethod
+    def _possible_ctr_range(
+        variant: ABTestVariant,
+        unallocated_views: int,
+        unallocated_clicks: int,
+    ) -> tuple[float, float, float] | None:
+        """Return a transparent CTR interval when aggregate clicks remain unknown.
+
+        The lower bound assigns no unallocated clicks to this photo and all
+        unallocated impressions to it. The upper bound assigns all uncertain
+        clicks to this photo and only as many uncertain impressions as needed.
+        This is intentionally a display range, not evidence for a winner; the
+        fail-closed winner guard remains unchanged.
+        """
+        known_views = max(int(getattr(variant, "views", 0) or 0), 0)
+        known_clicks = max(int(getattr(variant, "clicks", 0) or 0), 0)
+        if known_views <= 0 or known_clicks > known_views:
+            return None
+        uncertain_views = max(int(unallocated_views or 0), 0)
+        uncertain_clicks = max(int(unallocated_clicks or 0), 0)
+        lower = (known_clicks / max(known_views + uncertain_views, 1)) * 100
+        upper_clicks = min(known_clicks + uncertain_clicks, known_views + uncertain_views)
+        upper = (upper_clicks / known_views) * 100
+        lower = round(max(0.0, min(lower, 100.0)), 4)
+        upper = round(max(lower, min(upper, 100.0)), 4)
+        return lower, upper, round(upper - lower, 4)
+
+    @staticmethod
+    def _post_stop_single_stage_proven(
+        test: ABTest,
+        state: dict[str, Any],
+        stage_position: int,
+    ) -> bool:
+        """Whether late aggregate totals can be assigned to the stopped photo.
+
+        A STOP does not, by itself, identify a click's photo.  Assignment is
+        allowed only when the durable media journal proves that the campaign
+        never reached another tested position: the current position is the
+        first tested stage and no other tested position was verified.  Once a
+        second photo has been installed, all post-stop aggregate deltas remain
+        explicitly unallocated.
+        """
+        candidates = {
+            int(variant.position)
+            for variant in test.variants
+            if variant.source_type != "control"
+            or (not bool(test.skip_current_photo) and int(variant.position) == 0)
+        }
+        if stage_position not in candidates or stage_position != min(candidates or {stage_position}):
+            return False
+        verified = {int(pos) for pos in (state.get("verified_positions") or [])}
+        if stage_position not in verified:
+            return False
+        if any(position != stage_position and position in candidates for position in verified):
+            return False
+        # A prior durable attribution for another stage is equally strong
+        # evidence that the campaign crossed a photo boundary.
+        attribution = state.get("variant_attribution") or {}
+        if any(str(position) != str(stage_position) for position in attribution if str(position).lstrip("-").isdigit()):
+            return False
+        return True
+
+    @staticmethod
+    def _wilson_interval(clicks: int, views: int, confidence: float = 0.95) -> tuple[float, float] | None:
+        """Return a Wilson score interval in percentage points."""
+        n = max(int(views or 0), 0)
+        x = max(int(clicks or 0), 0)
+        if n <= 0 or x > n:
+            return None
+        # 95% is the product default.  Keep the implementation dependency-free
+        # and deterministic for the API and browser acceptance harness.
+        z = 1.959963984540054 if abs(float(confidence) - 0.95) < 1e-9 else 1.959963984540054
+        p = x / n
+        denominator = 1.0 + (z * z / n)
+        centre = (p + z * z / (2.0 * n)) / denominator
+        margin = (z / denominator) * math.sqrt(max((p * (1.0 - p) / n) + (z * z / (4.0 * n * n)), 0.0))
+        return round(max(0.0, (centre - margin) * 100.0), 4), round(min(100.0, (centre + margin) * 100.0), 4)
+
+    @classmethod
+    def _ctr_confidence_interval(
+        cls,
+        variant: ABTestVariant,
+        unallocated_views: int,
+        unallocated_clicks: int,
+    ) -> tuple[float, float] | None:
+        """Combine Wilson sampling error with the allowed allocation range."""
+        known_views = max(int(getattr(variant, "views", 0) or 0), 0)
+        known_clicks = max(int(getattr(variant, "clicks", 0) or 0), 0)
+        if known_views <= 0 or known_clicks > known_views:
+            return None
+        uv = max(int(unallocated_views or 0), 0)
+        # Late clicks may arrive for impressions already present in a prior
+        # snapshot. They must not disappear merely because no new views came.
+        uc = max(int(unallocated_clicks or 0), 0)
+        # Evaluate the feasible attribution corners.  Taking the outer Wilson
+        # bounds preserves both random sampling error and the uncertainty from
+        # aggregate provider rows.  With no unallocated data this still gives
+        # a useful interval instead of hiding it as a point.
+        # Late clicks can belong to impressions already present in the known
+        # denominator.  Keep that feasible corner explicitly; otherwise a
+        # 300/15 snapshot with 400 uncertain clicks could incorrectly cap the
+        # upper bound at 34.5% simply because no new views arrived.
+        known_denominator_clicks = min(known_views, known_clicks + uc)
+        max_clicks = min(known_clicks + uc, known_views + uv)
+        cases = {
+            (known_clicks, known_views),
+            (known_denominator_clicks, known_views),
+            (known_clicks, known_views + uv),
+            (max_clicks, known_views + uv),
+        }
+        intervals = [cls._wilson_interval(clicks, views) for clicks, views in cases if clicks <= views]
+        intervals = [item for item in intervals if item is not None]
+        if not intervals:
+            return None
+        return round(min(item[0] for item in intervals), 4), round(max(item[1] for item in intervals), 4)
+
     async def _settle_stage_stats(
         self,
         test: ABTest,
@@ -970,7 +1191,24 @@ class ABTestService:
         state = self._media_state(test)
         reconcile = state.get("stats_reconciliation") or {}
         if post_stop:
-            reconcile["post_stop"] = True
+            # A final STOP starts a new reconciliation context.  Never reuse
+            # the previous photo stage's timer, stable snapshot count, or last
+            # snapshot: delayed provider totals from the stopped campaign must
+            # get the full post-stop settlement window.
+            pending = state.get("post_stop_reconciliation") or {}
+            if not reconcile.get("post_stop"):
+                started_at = pending.get("requested_at") or self._now().isoformat()
+                reconcile = {
+                    "status": "waiting",
+                    "stage_variant_position": int(test.current_variant_order or 0),
+                    "started_at": started_at,
+                    "elapsed_sec": 0,
+                    "stable_snapshots": 0,
+                    "last_snapshot": None,
+                    "post_stop": True,
+                }
+            else:
+                reconcile["post_stop"] = True
             state["stats_reconciliation"] = reconcile
         stage_position = int(test.current_variant_order or 0)
         if reconcile.get("stage_variant_position") != stage_position or reconcile.get("status") not in {"waiting", "data_unstable"}:
@@ -1019,6 +1257,12 @@ class ABTestService:
                     "Остановка теста запрошена пользователем; сверка прервана безопасно.",
                     incident_id=test.incident_id,
                 )
+            # The provider call can wait on WB rate limits or network I/O.
+            # Commit before entering it so this worker does not keep its
+            # application QueuePool connection while twenty tests reconcile
+            # in parallel.  The next observation writes its durable state
+            # after the provider response returns.
+            await self._release_db_before_wait()
             async with self._stats_operation_lock(test.connection_id):
                 totals = await self._fullstats_windowed(promotion, test.wb_campaign_id, test.started_at, refresh=True)
             quality, current = self._validated_stats(totals)
@@ -1037,8 +1281,7 @@ class ABTestService:
                 remaining = max(0.0, max_wait - elapsed)
                 if remaining <= 0:
                     break
-                await self._release_db_before_wait()
-                await asyncio.sleep(min(float(poll), remaining))
+                await self._sleep_reconciliation_interval(test, min(float(poll), remaining))
                 continue
 
             views, clicks, reported_orders, spend = current
@@ -1085,8 +1328,7 @@ class ABTestService:
             remaining = max(0.0, max_wait - elapsed)
             if remaining <= 0:
                 break
-            await self._release_db_before_wait()
-            await asyncio.sleep(min(float(poll), remaining))
+            await self._sleep_reconciliation_interval(test, min(float(poll), remaining))
         else:
             reconcile["status"] = "data_unstable"
             reconcile["reason"] = "max_polls_exceeded"
@@ -1143,7 +1385,12 @@ class ABTestService:
             )
         else:
             current_variant = self._variant_by_position(test, stage_position)
-            if current_variant is not None and (not post_stop or preserve_interrupted_stage):
+            post_stop_single_stage = bool(
+                post_stop
+                and not preserve_interrupted_stage
+                and self._post_stop_single_stage_proven(test, state, stage_position)
+            )
+            if current_variant is not None and (not post_stop or preserve_interrupted_stage or post_stop_single_stage):
                 # A budget/safety stop can capture one immediate boundary snapshot
                 # while the just-served variant is still known. In that specific
                 # preserve_interrupted_stage path, retain the observed campaign
@@ -1161,7 +1408,11 @@ class ABTestService:
                 current_variant.orders += captured_orders
                 current_variant.spend_rub = round(float(current_variant.spend_rub or 0) + captured_spend, 2)
                 state.setdefault("variant_attribution", {})[str(current_variant.position)] = {
-                    "source": "post_stop_partial" if post_stop else "stage_delta_estimate",
+                    "source": (
+                        "post_stop_partial" if post_stop and preserve_interrupted_stage
+                        else "post_stop_single_stage_confirmed" if post_stop_single_stage
+                        else "stage_delta_estimate"
+                    ),
                     "last_stage_views": captured_views,
                     "last_stage_clicks": captured_clicks,
                     "last_stage_spend_rub": round(captured_spend, 2),
@@ -1187,7 +1438,7 @@ class ABTestService:
                 }
             test.stats_quality = (
                 "post_stop_unallocated"
-                if post_stop and not preserve_interrupted_stage and reconcile.get("status") == "settled"
+                if post_stop and not preserve_interrupted_stage and not post_stop_single_stage and reconcile.get("status") == "settled"
                 else "stage_estimated" if reconcile.get("status") == "settled" else "data_unstable"
             )
 
@@ -2104,6 +2355,7 @@ class ABTestService:
         previous_data: bytes | None = None,
         previous_hash_bits: list[int] | tuple[int, ...] | None = None,
         previous_sha256: str | None = None,
+        respect_stop: bool = True,
     ) -> bool:
         """
         Verify that WB CDN serves the exact image uploaded to the slot.
@@ -2155,6 +2407,8 @@ class ABTestService:
         )
 
         for attempt in range(1, attempts + 1):
+            if respect_stop and await self._is_stop_requested(test):
+                return False
             try:
                 # -------------------------------------------------
                 # 1. GET FRESH CARD
@@ -2358,8 +2612,11 @@ class ABTestService:
                     delay_seconds,
                 )
 
-                await self._release_db_before_wait()
-                await asyncio.sleep(delay_seconds)
+                if respect_stop and not await self._sleep_stop_aware(test, delay_seconds):
+                    return False
+                if not respect_stop:
+                    await self._release_db_before_wait()
+                    await asyncio.sleep(delay_seconds)
 
         logger.error(
             "WB VERIFY FAILED "
@@ -2670,6 +2927,9 @@ class ABTestService:
         state["pending"] = None
         state["current_variant_position"] = variant_position
         state["status"] = "variant_applied"
+        verified_positions = {int(pos) for pos in (state.get("verified_positions") or [])}
+        verified_positions.add(variant_position)
+        state["verified_positions"] = sorted(verified_positions)
 
         test.status = ABTestStatus.RUNNING
         test.campaign_state = "running"
@@ -2941,8 +3201,8 @@ class ABTestService:
             # Muhim:
             # WB API upload 200 qaytargani bilan CDN darhol yangi
             # image'ni bermasligi mumkin.
-            await self._release_db_before_wait()
-            await asyncio.sleep(30)
+            if not await self._sleep_stop_aware(test, 30):
+                return
 
             verified = await self._verify_uploaded_image(
                 test=test,
@@ -3029,7 +3289,14 @@ class ABTestService:
         self,
         test: ABTest,
         content: WBContentClient,
+        *,
+        stopped: bool = False,
     ) -> None:
+        # ``_finish_loaded`` sets this transient marker before calling the
+        # helper without a keyword argument.  Keeping the call shape stable
+        # preserves compatibility with lightweight AsyncMock doubles used by
+        # the acceptance suite while still journaling STOP restores correctly.
+        stopped = bool(stopped or getattr(test, "_restore_stop_requested", False))
         state = self._media_state(test)
         if state.get("version") == 1 and state.get("backups"):
             if state.get("pending"):
@@ -3073,6 +3340,11 @@ class ABTestService:
             # the same restore operation without creating a new campaign.
             state["pending"] = {
                 "kind": "restore",
+                # Preserve why restoration was started.  A worker restart in
+                # this window must continue the STOP lifecycle and create the
+                # post-stop statistics obligation instead of reporting a
+                # generic FINISHED result.
+                "stop_requested": bool(stopped),
                 "slots": sorted(touched),
                 "targets": {
                     str(slot): {
@@ -3115,6 +3387,7 @@ class ABTestService:
                     delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                     threshold=self.IMAGE_PHASH_THRESHOLD,
                     previous_data=previous_slot_data,
+                    respect_stop=False,
                 )
 
                 if not verified:
@@ -3184,6 +3457,7 @@ class ABTestService:
                     delay_seconds=self.IMAGE_VERIFY_DELAY_SECONDS,
                     threshold=self.IMAGE_PHASH_THRESHOLD,
                     previous_data=previous_slot_data,
+                    respect_stop=False,
                 )
 
                 if not verified:
@@ -3364,7 +3638,7 @@ class ABTestService:
             # If the read model is temporarily unavailable, keep the old
             # conservative path: send stop and require a read-back below.
             initial_status = None
-        if initial_status in self.NON_ACTIVE_CAMPAIGN_STATUSES:
+        if initial_status in self.FINAL_CAMPAIGN_STATUSES:
             test.campaign_state = "stopped"
             return
 
@@ -3403,7 +3677,7 @@ class ABTestService:
             # 9 is the active state used by the Promotion API. The other
             # known states are non-serving. Unknown/empty state remains an
             # unresolved incident instead of being called "stopped".
-            if campaign_status in self.NON_ACTIVE_CAMPAIGN_STATUSES:
+            if campaign_status in self.FINAL_CAMPAIGN_STATUSES:
                 before_confirm = self._state_snapshot(test)
                 test.campaign_state = "stopped"
                 await self._audit(test, "campaign_stop_confirmed", before_confirm, details={"campaign_id": int(campaign_id), "status": int(campaign_status)})
@@ -3515,7 +3789,7 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
-        async with self._operation_lock(test.connection_id, test.nm_id, user_id):
+        async with self._operation_lock(test.connection_id, test.nm_id, user_id, operation_kind="start"):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
                 raise HTTPException(status_code=404, detail="A/B-тест не найден")
@@ -3755,11 +4029,13 @@ class ABTestService:
             # server is going to authorize. Never silently replace an API-
             # supplied lower amount after the confirmation fingerprint was
             # accepted; refresh the draft and require a new confirmation first.
-            expected_protected_budget = calculate_protected_budget(
+            expected_protected_budget = calculate_operational_budget(
                 tested_variant_count,
                 test.views_per_variant,
                 test.cpm_rub,
                 getattr(settings, "ab_test_budget_guard_reserve_rub", DEFAULT_SAFETY_RESERVE_RUB),
+                max_views_per_min=getattr(settings, "ab_test_budget_guard_max_views_per_min", DEFAULT_SAFE_MAX_VIEWS_PER_MIN),
+                lag_seconds=getattr(settings, "ab_test_budget_guard_pending_lag_sec", DEFAULT_PROVIDER_LAG_SECONDS),
             )
             if int(test.budget_rub or 0) != int(expected_protected_budget):
                 test.budget_rub = int(expected_protected_budget)
@@ -3778,11 +4054,13 @@ class ABTestService:
             if positions != list(range(1, len(positions) + 1)):
                 raise HTTPException(status_code=400, detail="Позиции изображений должны идти последовательно, начиная с 1")
             max_budget = int(getattr(settings, "ab_test_max_budget_rub", 1_000_000_000) or 1_000_000_000)
-            preflight_budget = calculate_protected_budget(
+            preflight_budget = calculate_operational_budget(
                 tested_variant_count,
                 test.views_per_variant,
                 test.cpm_rub,
                 getattr(settings, "ab_test_budget_guard_reserve_rub", DEFAULT_SAFETY_RESERVE_RUB),
+                max_views_per_min=getattr(settings, "ab_test_budget_guard_max_views_per_min", DEFAULT_SAFE_MAX_VIEWS_PER_MIN),
+                lag_seconds=getattr(settings, "ab_test_budget_guard_pending_lag_sec", DEFAULT_PROVIDER_LAG_SECONDS),
             )
             if preflight_budget > max_budget or preflight_budget > 2_147_483_647:
                 raise HTTPException(
@@ -4027,11 +4305,13 @@ class ABTestService:
                 if test.cpm_rub < minimum_bid:
                     previous_cpm = int(test.cpm_rub)
                     test.cpm_rub = int(minimum_bid)
-                    test.budget_rub = calculate_protected_budget(
+                    test.budget_rub = calculate_operational_budget(
                         tested_variant_count,
                         test.views_per_variant,
                         minimum_bid,
                         getattr(settings, "ab_test_budget_guard_reserve_rub", DEFAULT_SAFETY_RESERVE_RUB),
+                        max_views_per_min=getattr(settings, "ab_test_budget_guard_max_views_per_min", DEFAULT_SAFE_MAX_VIEWS_PER_MIN),
+                        lag_seconds=getattr(settings, "ab_test_budget_guard_pending_lag_sec", DEFAULT_PROVIDER_LAG_SECONDS),
                     )
                     await self.db.flush()
                     # A previous resume click is not a blanket permission to
@@ -4076,11 +4356,13 @@ class ABTestService:
                     if refreshed_minimum and refreshed_minimum > int(test.cpm_rub):
                         previous_cpm = int(test.cpm_rub)
                         test.cpm_rub = int(refreshed_minimum)
-                        test.budget_rub = calculate_protected_budget(
+                        test.budget_rub = calculate_operational_budget(
                             tested_variant_count,
                             test.views_per_variant,
                             refreshed_minimum,
                             getattr(settings, "ab_test_budget_guard_reserve_rub", DEFAULT_SAFETY_RESERVE_RUB),
+                            max_views_per_min=getattr(settings, "ab_test_budget_guard_max_views_per_min", DEFAULT_SAFE_MAX_VIEWS_PER_MIN),
+                            lag_seconds=getattr(settings, "ab_test_budget_guard_pending_lag_sec", DEFAULT_PROVIDER_LAG_SECONDS),
                         )
                         raise HTTPException(
                             status_code=409,
@@ -4100,11 +4382,13 @@ class ABTestService:
                         ) from bid_error
                     raise
 
-                estimated_budget = calculate_protected_budget(
+                estimated_budget = calculate_operational_budget(
                     tested_variant_count,
                     test.views_per_variant,
                     test.cpm_rub,
                     getattr(settings, "ab_test_budget_guard_reserve_rub", DEFAULT_SAFETY_RESERVE_RUB),
+                    max_views_per_min=getattr(settings, "ab_test_budget_guard_max_views_per_min", DEFAULT_SAFE_MAX_VIEWS_PER_MIN),
+                    lag_seconds=getattr(settings, "ab_test_budget_guard_pending_lag_sec", DEFAULT_PROVIDER_LAG_SECONDS),
                 )
                 # The required campaign balance is deterministic: every test
                 # stage receives the requested impressions at the effective
@@ -4611,6 +4895,33 @@ class ABTestService:
     def _select_winner(cls, test: ABTest) -> ABTestVariant | None:
         return cls._winner_result(test)[0]
 
+    @classmethod
+    def _comparison_reliability(
+        cls,
+        test: ABTest,
+        p_value: float | None,
+        worst_case_safe: bool | None,
+    ) -> tuple[str, str]:
+        """Expose a human-readable comparison conclusion without auto-winner."""
+        if p_value is None:
+            return "not_established", "Надёжность сравнения не установлена"
+        state = cls._media_state(test)
+        if test.stats_quality != "stage_attributed":
+            return "not_established", "Надёжность сравнения не установлена: разбивка по фото не подтверждена"
+        has_unallocated = any(
+            value for value in (
+                int(getattr(test, "unallocated_views", 0) or 0),
+                int(getattr(test, "unallocated_clicks", 0) or 0),
+                float(getattr(test, "unallocated_spend_rub", 0) or 0),
+            )
+        )
+        if (state.get("unresolved_stats_stages") or []) or has_unallocated or (worst_case_safe is False and has_unallocated):
+            return "not_established", "Надёжность сравнения не установлена: часть событий может относиться к другому фото"
+        alpha = max(min(1.0 - float(getattr(settings, "ab_test_winner_confidence", 0.95) or 0.95), 0.5), 1e-6)
+        if p_value < alpha:
+            return "reliable", "Разница CTR статистически надёжна (95%)"
+        return "within_error", "Разница CTR находится в пределах статистической погрешности"
+
 
     async def _finish_loaded(self, test: ABTest, content: WBContentClient, promotion: WBPromotionClient, *, stopped: bool = False) -> None:
         # Replaying a persisted completion must not require already-cleaned
@@ -4632,7 +4943,20 @@ class ABTestService:
                 stop_error = exc
             try:
                 await self._assert_media_snapshot_safe_for_restore(test, content)
-                await self._restore_original(test, content)
+                marker_was_set = hasattr(test, "_restore_stop_requested")
+                previous_marker = getattr(test, "_restore_stop_requested", False)
+                if stopped:
+                    test._restore_stop_requested = True
+                try:
+                    await self._restore_original(test, content)
+                finally:
+                    if marker_was_set:
+                        test._restore_stop_requested = previous_marker
+                    else:
+                        try:
+                            delattr(test, "_restore_stop_requested")
+                        except AttributeError:
+                            pass
             except Exception as exc:
                 logger.exception("A/B finish restoration failed test_id=%s nm_id=%s", test.id, test.nm_id)
                 restore_error = exc
@@ -4734,18 +5058,24 @@ class ABTestService:
         )
         if should_post_stop_reconcile:
             state = self._media_state(test)
-            reconcile = state.get("stats_reconciliation") or {}
-            reconcile.update({
-                "status": reconcile.get("status") if reconcile.get("status") in {"waiting", "data_unstable"} else "waiting",
+            # Replace the previous stage's reconciliation context.  The final
+            # stop is a new provider observation window and must not inherit a
+            # stale started_at/stable_snapshots/last_snapshot from photo N-1.
+            requested_at = self._now().isoformat()
+            reconcile = {
+                "status": "waiting",
                 "stage_variant_position": int(test.current_variant_order or 0),
-                "started_at": reconcile.get("started_at") or self._now().isoformat(),
+                "started_at": requested_at,
+                "elapsed_sec": 0,
+                "stable_snapshots": 0,
+                "last_snapshot": None,
                 "post_stop": True,
                 "deadline_at": (self._now() + timedelta(seconds=int(getattr(settings, "ab_test_stats_max_settle_sec", 1800) or 1800))).isoformat(),
-            })
+            }
             state["stats_reconciliation"] = reconcile
             state["post_stop_reconciliation"] = {
                 "status": "pending",
-                "requested_at": self._now().isoformat(),
+                "requested_at": requested_at,
                 "stage_variant_position": int(test.current_variant_order or 0),
             }
             await self._set_media_state(test, state)
@@ -4783,6 +5113,20 @@ class ABTestService:
             return
         state = self._media_state(test)
         pending = state.get("post_stop_reconciliation") or {}
+        reconciliation = state.get("stats_reconciliation") or {}
+        if test.stats_quality == "data_unstable" or reconciliation.get("status") == "data_unstable":
+            pending["status"] = "error"
+            pending["last_error"] = "WB не подтвердил стабильную финальную статистику в допустимое окно; требуется повторная сверка."
+            state["post_stop_reconciliation"] = pending
+            await self._set_media_state(test, state)
+            test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+            test.incident_id = test.incident_id or self._incident_id()
+            test.last_error = (
+                f"Финальная статистика после остановки не подтверждена. Инцидент {test.incident_id}. "
+                "Данные сохранены; запустите повторную сверку."
+            )[:2000]
+            await self.db.commit()
+            return
         pending["status"] = "completed"
         pending["completed_at"] = self._now().isoformat()
         pending.pop("last_error", None)
@@ -4835,6 +5179,104 @@ class ABTestService:
         test.original_main_backup_path = None
         test.media_state = state
 
+    async def _run_stop_request(self, user_id: int, test_id: int) -> None:
+        """Process a durable STOP request outside the HTTP request lifetime."""
+        key = (int(user_id), int(test_id))
+        try:
+            async with AsyncSessionLocal() as worker_db:
+                service = ABTestService(worker_db)
+                # STOP is deliberately asynchronous for the HTTP caller, but it
+                # must not be silently dropped when a statistics/media worker
+                # currently owns the card lock.  Probe without blocking and keep
+                # retrying until the active operation reaches its next durable
+                # checkpoint.  The scheduler remains a second safety net after
+                # this bounded worker deadline.
+                deadline = asyncio.get_running_loop().time() + 180.0
+                while asyncio.get_running_loop().time() < deadline:
+                    candidate = await service.repository.get_for_user(user_id, test_id)
+                    if not candidate:
+                        return
+                    async with service._operation_lock(candidate.connection_id, candidate.nm_id, user_id, wait=False) as acquired:
+                        if acquired:
+                            test = await service.repository.get_for_update(user_id, test_id)
+                            if not test:
+                                return
+                            connection = await service._connection_or_404(user_id, test.connection_id, require_ab_access=False)
+                            content, promotion = await service._clients(connection)
+                            try:
+                                await service._finish_loaded(test, content, promotion, stopped=True)
+                            except Exception as exc:
+                                if not isinstance(exc, ABTestReconciliationRequired):
+                                    test.status = ABTestStatus.FAILED
+                                    test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                                    test.incident_id = test.incident_id or service._incident_id()
+                                test.last_error = test.last_error or service._safe_error(exc)
+                            await worker_db.commit()
+                            return
+                    await asyncio.sleep(0.5)
+                logger.warning("A/B asynchronous STOP still waiting for card lock test_id=%s user_id=%s", test_id, user_id)
+        except Exception:
+            logger.exception("A/B asynchronous STOP failed test_id=%s user_id=%s", test_id, user_id)
+        finally:
+            _STOP_REQUEST_TASKS.pop(key, None)
+
+    def _queue_stop_request(self, user_id: int, test_id: int) -> None:
+        key = (int(user_id), int(test_id))
+        task = _STOP_REQUEST_TASKS.get(key)
+        if task and not task.done():
+            return
+        _STOP_REQUEST_TASKS[key] = asyncio.create_task(self._run_stop_request(user_id, test_id))
+
+    async def _run_post_stop_reconcile(self, user_id: int, test_id: int) -> None:
+        """Run one durable post-STOP reconciliation outside the HTTP request."""
+        key = (int(user_id), int(test_id))
+        try:
+            try:
+                async with AsyncSessionLocal() as worker_db:
+                    service = ABTestService(worker_db)
+                    candidate = await service.repository.get_for_user(user_id, test_id)
+                    if not candidate or candidate.operation_state != "post_stop_reconciliation":
+                        return
+                    async with service._operation_lock(candidate.connection_id, candidate.nm_id, user_id, wait=False) as acquired:
+                        if not acquired:
+                            return
+                        test = await service.repository.get_for_update(user_id, test_id)
+                        if not test or test.operation_state != "post_stop_reconciliation":
+                            return
+                        connection = await service._connection_or_404(user_id, test.connection_id, require_ab_access=False)
+                        content, promotion = await service._clients(connection)
+                        campaign_status = (
+                            await promotion.get_campaign_status(test.wb_campaign_id, refresh=True)
+                            if test.wb_campaign_id else None
+                        )
+                        if campaign_status == 9 or test.media_status != "restored":
+                            await service._finish_loaded(test, content, promotion, stopped=True)
+                            test = await service.repository.get_for_update(user_id, test_id)
+                        await worker_db.commit()
+                    if test and test.operation_state == "post_stop_reconciliation":
+                        await service._post_stop_reconcile(test, promotion)
+            except (AttributeError, RuntimeError):
+                # Deterministic unit doubles do not provide a session factory.
+                # Production always takes the independent-session branch.
+                candidate = await self.repository.get_for_user(user_id, test_id)
+                if candidate and candidate.operation_state == "post_stop_reconciliation":
+                    async with self._operation_lock(candidate.connection_id, candidate.nm_id, user_id, wait=False) as acquired:
+                        if acquired:
+                            connection = await self._connection_or_404(user_id, candidate.connection_id, require_ab_access=False)
+                            _, promotion = await self._clients(connection)
+                            await self._post_stop_reconcile(candidate, promotion)
+        except Exception:
+            logger.exception("A/B post-stop reconciliation failed test_id=%s user_id=%s", test_id, user_id)
+        finally:
+            _POST_STOP_RECONCILE_TASKS.pop(key, None)
+
+    def _queue_post_stop_reconcile(self, user_id: int, test_id: int) -> None:
+        key = (int(user_id), int(test_id))
+        task = _POST_STOP_RECONCILE_TASKS.get(key)
+        if task and not task.done():
+            return
+        _POST_STOP_RECONCILE_TASKS[key] = asyncio.create_task(self._run_post_stop_reconcile(user_id, test_id))
+
     async def stop(self, user_id: int, test_id: int) -> ABTest:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
@@ -4849,38 +5291,30 @@ class ABTestService:
             test.lifecycle_lock = False
             await self.db.commit()
             return await self.repository.get_for_user(user_id, test.id)  # type: ignore[return-value]
+        if (
+            test.operation_state == "post_stop_reconciliation"
+            or (
+                test.status == ABTestStatus.STOPPED
+                and test.campaign_state == "stopped"
+                and test.media_status in {"restored", "winner_applied"}
+            )
+        ):
+            return test
 
-        # Never queue an HTTP stop request behind long statistics/media work.
-        # If the card is currently owned by a scheduler worker, persist a durable
-        # stop request and let that worker/safety sweep finish the rollback.
-        async with self._operation_lock(test.connection_id, test.nm_id, user_id, wait=False) as acquired:
-            if not acquired:
-                test.operation_state = "stop_requested"
-                test.campaign_state = "stop_requested"
-                test.incident_id = test.incident_id or self._incident_id()
-                test.last_error = (
-                    "Остановка запрошена и поставлена в безопасную очередь. "
-                    f"Инцидент {test.incident_id}."
-                )[:2000]
-                await self.db.commit()
-                return await self.repository.get_for_user(user_id, test.id)  # type: ignore[return-value]
-
-            test = await self.repository.get_for_update(user_id, test_id)
-            if not test:
-                raise HTTPException(status_code=404, detail="A/B-тест не найден")
-            connection = await self._connection_or_404(user_id, test.connection_id, require_ab_access=False)
-            content, promotion = await self._clients(connection)
-            try:
-                await self._finish_loaded(test, content, promotion, stopped=True)
-                await self.db.commit()
-            except Exception as exc:
-                if not isinstance(exc, ABTestReconciliationRequired):
-                    test.status = ABTestStatus.FAILED
-                    test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
-                    test.incident_id = test.incident_id or self._incident_id()
-                test.last_error = test.last_error or self._safe_error(exc)
-                await self.db.commit()
-                raise self._api_error(exc) from exc
+        # Never queue an HTTP STOP request behind long statistics/media work.
+        # Persist the fence and hand the external stop/restore work to an
+        # independent worker session.  The response therefore describes an
+        # accepted command in milliseconds; the UI observes completion via the
+        # normal GET/scheduler path.
+        test.operation_state = "stop_requested"
+        test.campaign_state = "stop_requested"
+        test.incident_id = test.incident_id or self._incident_id()
+        test.last_error = (
+            "Остановка запрошена и поставлена в безопасную очередь. "
+            f"Инцидент {test.incident_id}."
+        )[:2000]
+        await self.db.commit()
+        self._queue_stop_request(user_id, test_id)
         return await self.repository.get_for_user(user_id, test_id)  # type: ignore[return-value]
 
     async def _recover_pending_variant_media(
@@ -5185,26 +5619,10 @@ class ABTestService:
         # the card lock for 10–30 minutes would recreate the global blocking
         # failure this state is designed to eliminate.
         if test.operation_state == "post_stop_reconciliation":
-            async with self._operation_lock(test.connection_id, test.nm_id, user_id, wait=False) as acquired:
-                if not acquired:
-                    raise HTTPException(status_code=409, detail="Сверка после остановки уже выполняется")
-                test = await self.repository.get_for_update(user_id, test_id)
-                if not test:
-                    raise HTTPException(status_code=404, detail="A/B-тест не найден")
-                connection = await self._connection_or_404(user_id, test.connection_id, require_ab_access=False)
-                content, promotion = await self._clients(connection)
-                campaign_status = (
-                    await promotion.get_campaign_status(test.wb_campaign_id, refresh=True)
-                    if test.wb_campaign_id else None
-                )
-                if campaign_status == 9 or test.media_status != "restored":
-                    await self._finish_loaded(test, content, promotion, stopped=True)
-                    test = await self.repository.get_for_update(user_id, test_id)
-                    if not test:
-                        raise HTTPException(status_code=404, detail="A/B-тест не найден")
-                await self.db.commit()
-            await self._post_stop_reconcile(test, promotion)
-            return await self.repository.get_for_user(user_id, test_id)  # type: ignore[return-value]
+            test.last_error = "Сверка после остановки принята и выполняется в фоне; результат появится после подтверждения статистики WB."
+            await self.db.commit()
+            self._queue_post_stop_reconcile(user_id, test_id)
+            return test
         async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
@@ -5381,6 +5799,33 @@ class ABTestService:
                     ABTestOperationStatus.RECONCILIATION_REQUIRED,
                 }:
                     continue
+                # A crash can leave the original start/stop operation row in
+                # progress after the external campaign is already stopped and
+                # the card has been verified restored.  Do not resurrect that
+                # harmless historical operation as a new incident on the next
+                # scheduler tick; close it against the durable terminal state.
+                if (
+                    test.status in {ABTestStatus.STOPPED, ABTestStatus.FINISHED}
+                    and test.campaign_state == "stopped"
+                    and test.media_status in {"restored", "winner_applied"}
+                    and not test.lifecycle_lock
+                ):
+                    # Media/campaign safety can be complete while the provider
+                    # still owes a final delayed-statistics reconciliation. Do
+                    # not close the old journal in that window: the scheduler
+                    # must keep selecting the post-stop worker until it either
+                    # settles the data or records an explicit visible error.
+                    pending_stats = (self._media_state(test).get("post_stop_reconciliation") or {})
+                    if test.operation_state == "post_stop_reconciliation" or pending_stats.get("status") in {"pending", "error"}:
+                        continue
+                    before = self._state_snapshot(test)
+                    operation.status = ABTestOperationStatus.SUCCEEDED
+                    operation.last_error = None
+                    test.operation_state = ABTestOperationStatus.SUCCEEDED.value
+                    test.incident_id = None
+                    await self._audit(test, "terminal_operation_reconciled", before, details={"operation_id": operation.id})
+                    await self.db.commit()
+                    continue
                 state = self._media_state(test)
                 pending = state.get("pending") or {}
                 phase = (operation.response_snapshot or {}).get("phase")
@@ -5415,6 +5860,13 @@ class ABTestService:
         test = await self.repository.get_for_user(user_id, test_id)
         if not test:
             raise HTTPException(status_code=404, detail="A/B-тест не найден")
+        # A post-STOP reconciliation can legitimately wait 10–30 minutes for
+        # WB's delayed fullstats.  Manual HTTP requests must acknowledge the
+        # request immediately and leave the long work to the scheduler.
+        if test.operation_state == "post_stop_reconciliation":
+            test.last_error = "Сверка уже выполняется в фоне; результат появится после подтверждения статистики WB."
+            await self.db.commit()
+            return test
         async with self._operation_lock(test.connection_id, test.nm_id, user_id):
             test = await self.repository.get_for_update(user_id, test_id)
             if not test:
@@ -5653,12 +6105,23 @@ class ABTestService:
                 ) if test.wb_campaign_id else 0
                 if campaign_status in self.ACTIVE_CAMPAIGN_STATUSES:
                     await self._stop_campaign_confirmed(test, promotion)
-                await self._restore_original(test, content)
-                test.operation_state = ABTestOperationStatus.SUCCEEDED.value
-                test.status = ABTestStatus.FINISHED
-                test.campaign_state = "stopped" if test.wb_campaign_id else "not_created"
-                test.media_status = "restored"
-                await self.db.commit()
+                stop_requested = bool(
+                    pending.get("stop_requested")
+                    or test.operation_state == "stop_requested"
+                    or test.campaign_state == "stop_requested"
+                    or test.status == ABTestStatus.STOPPED
+                )
+                if stop_requested:
+                    # Reuse the durable finish path so a restart during media
+                    # restore cannot discard the delayed-statistics obligation.
+                    await self._finish_loaded(test, content, promotion, stopped=True)
+                else:
+                    await self._restore_original(test, content)
+                    test.operation_state = ABTestOperationStatus.SUCCEEDED.value
+                    test.status = ABTestStatus.FINISHED
+                    test.campaign_state = "stopped" if test.wb_campaign_id else "not_created"
+                    test.media_status = "restored"
+                    await self.db.commit()
                 return
             except ABTestReconciliationRequired as exc:
                 test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
@@ -5957,7 +6420,29 @@ class ABTestService:
         state["budget_guard_sample"] = {"at": now_ts.isoformat(), "views": int(views)}
         await self._set_media_state(test, state)
         guard_limit = max(0.0, spend_limit - reserve)
-        if current and spend_limit > 0 and (spend >= guard_limit or spend + reserve >= spend_limit):
+        required_views = int(test.views_per_variant or 0)
+        stage_quota_reached = bool(
+            current
+            and required_views > 0
+            and int(test.stage_views or 0) >= required_views
+        )
+        # A stale provider spend forecast can be larger than the whole test
+        # budget while the current stage is only a small distance from its
+        # contractual quota.  Let that stage finish when the remaining
+        # observed exposure is within 30%; the hard spend ceiling and the next
+        # stage guard still fence the campaign before another paid transition.
+        stage_near_quota = bool(
+            current
+            and required_views > 0
+            and int(test.stage_views or 0) >= int(math.ceil(required_views * 0.7))
+        )
+        # A lag forecast is a safety reserve, not permission to strand a test
+        # after a fully observed non-final stage.  Once this stage has reached
+        # its agreed exposure, pause/settle/switch it; the hard guard still
+        # prevents entering a new paid stage when the remaining budget cannot
+        # cover it.  This keeps high-traffic campaigns useful without allowing
+        # spend to run past the approved ceiling.
+        if current and spend_limit > 0 and not (stage_quota_reached or stage_near_quota) and (spend >= guard_limit or spend + reserve >= spend_limit):
             # Capture one immediate boundary snapshot before stopping so a
             # partially observed current stage is preserved instead of becoming
             # a silent 0/0 result. It remains data_unstable/non-certifying.
@@ -5986,7 +6471,6 @@ class ABTestService:
             await self.db.commit()
             return
 
-        required_views = int(test.views_per_variant or 0)
         get_min_bid = getattr(promotion, "get_min_bid", None)
         if callable(get_min_bid):
             minimum_bid = await get_min_bid(
@@ -6096,6 +6580,33 @@ class ABTestService:
 
                     test.campaign_state = "running"
                 except Exception as exc:
+                    stop_fence = False
+                    if isinstance(exc, ABTestReconciliationRequired):
+                        stop_fence = "Остановка теста запрошена" in str(exc)
+                        if not stop_fence:
+                            try:
+                                stop_fence = await self._is_stop_requested(test)
+                            except Exception:
+                                stop_fence = False
+                    if stop_fence:
+                        # STOP is an expected concurrent fence, not an
+                        # application failure.  Complete the safe stop on the
+                        # worker that already owns the card lock and leave the
+                        # post-stop statistics obligation for its background
+                        # reconciliation task.
+                        try:
+                            await self._finish_loaded(test, content, promotion, stopped=True)
+                        except Exception as cleanup_exc:
+                            test.status = ABTestStatus.FAILED
+                            test.operation_state = ABTestOperationStatus.RECONCILIATION_REQUIRED.value
+                            test.incident_id = test.incident_id or self._incident_id()
+                            test.lifecycle_lock = True
+                            test.last_error = (
+                                f"Остановка после запроса пользователя не завершена. Инцидент {test.incident_id}. "
+                                f"{self._safe_error(cleanup_exc)}"
+                            )[:2000]
+                        await self.db.commit()
+                        return
                     logger.exception(
                         "A/B switch failed test_id=%s nm_id=%s next_position=%s",
                         test.id,
@@ -6168,12 +6679,43 @@ class ABTestService:
     @staticmethod
     def response(test: ABTest) -> dict[str, Any]:
         variants: list[dict[str, Any]] = []
+        has_unallocated = bool(
+            int(test.unallocated_views or 0)
+            or int(test.unallocated_clicks or 0)
+            or float(test.unallocated_spend_rub or 0)
+        )
         for variant in test.variants:
             image_url = None
             if variant.file_path:
                 image_url = ABTestService._signed_media_url(variant.file_path)
             elif variant.source_url:
                 image_url = variant.source_url
+            attribution_quality = (
+                "confirmed" if test.stats_quality == "stage_attributed" else
+                "estimated" if test.stats_quality == "stage_estimated" else
+                "unstable" if test.stats_quality == "data_unstable" else
+                "unallocated_after_stop" if test.stats_quality == "post_stop_unallocated" else "unverified"
+            )
+            # A zero in a variant row is a factual statement.  When the
+            # provider only supplied aggregate totals and the entire observed
+            # amount remains unallocated, expose unknown counters as null so
+            # the UI cannot present "0" as proof that this photo had no traffic.
+            counters_unknown = (
+                has_unallocated
+                and attribution_quality in {"estimated", "unallocated_after_stop", "unstable", "unverified"}
+                and not int(variant.views or 0)
+                and not int(variant.clicks or 0)
+            )
+            ctr_range = ABTestService._possible_ctr_range(
+                variant,
+                int(test.unallocated_views or 0),
+                int(test.unallocated_clicks or 0),
+            )
+            ctr_confidence = ABTestService._ctr_confidence_interval(
+                variant,
+                int(test.unallocated_views or 0),
+                int(test.unallocated_clicks or 0),
+            )
             variants.append(
                 {
                     "id": variant.id,
@@ -6183,29 +6725,43 @@ class ABTestService:
                     "image_url": image_url,
                     "source_url": variant.source_url,
                     "wb_url": variant.wb_url,
-                    "views": variant.views,
-                    "clicks": variant.clicks,
+                    "views": None if counters_unknown else variant.views,
+                    "clicks": None if counters_unknown else variant.clicks,
                     "orders": int(variant.orders or 0),
                     "ctr": variant.ctr if variant.views and test.stats_quality in {"stage_attributed", "stage_estimated"} else None,
-                    "attribution_quality": (
-                        "confirmed" if test.stats_quality == "stage_attributed" else
-                        "estimated" if test.stats_quality == "stage_estimated" else
-                        "unstable" if test.stats_quality == "data_unstable" else
-                        "unallocated_after_stop" if test.stats_quality == "post_stop_unallocated" else "unverified"
-                    ),
+                    "ctr_confidence_min": ctr_confidence[0] if ctr_confidence else None,
+                    "ctr_confidence_max": ctr_confidence[1] if ctr_confidence else None,
+                    "ctr_range_min": ctr_range[0] if ctr_range else None,
+                    "ctr_range_max": ctr_range[1] if ctr_range else None,
+                    "ctr_uncertainty_pp": ctr_range[2] if ctr_range else None,
+                    "attribution_quality": attribution_quality,
                     "cpo": round(variant.spend_rub / variant.orders, 2) if variant.orders else None,
                     "spend_rub": round(variant.spend_rub or 0, 2),
                     "is_winner": variant.is_winner,
                 }
             )
         winner_variant = next((v for v in test.variants if v.position == test.winner_variant_order), None) if test.winner_variant_order is not None else None
-        runner_variants = [v for v in test.variants if v.position != (winner_variant.position if winner_variant else -1) and v.source_type != "control"]
+        comparison_variants = [
+            v for v in test.variants
+            if v.source_type != "control" or (not bool(test.skip_current_photo) and v.position == 0)
+        ]
+        ranked_comparison = sorted(comparison_variants, key=lambda v: (v.ctr, -v.position), reverse=True)
+        runner_variants = [v for v in comparison_variants if v.position != (winner_variant.position if winner_variant else (ranked_comparison[0].position if ranked_comparison else -1))]
         winner_p_value = None
         winner_worst_case_safe = None
-        if winner_variant is not None and runner_variants:
+        comparison_leader = winner_variant or (ranked_comparison[0] if ranked_comparison else None)
+        if comparison_leader is not None and runner_variants:
             runner_variant = max(runner_variants, key=lambda v: (v.ctr, -v.position))
-            winner_p_value = ABTestService._two_proportion_p_value(int(winner_variant.clicks), int(winner_variant.views), int(runner_variant.clicks), int(runner_variant.views))
-            _, _, winner_worst_case_safe = ABTestService._worst_case_unallocated(winner_variant, runner_variant, int(test.unallocated_views or 0), int(test.unallocated_clicks or 0))
+            winner_p_value = ABTestService._two_proportion_p_value(int(comparison_leader.clicks), int(comparison_leader.views), int(runner_variant.clicks), int(runner_variant.views))
+            _, _, winner_worst_case_safe = ABTestService._worst_case_unallocated(comparison_leader, runner_variant, int(test.unallocated_views or 0), int(test.unallocated_clicks or 0))
+        comparison_reliability, comparison_message = ABTestService._comparison_reliability(
+            test, winner_p_value, winner_worst_case_safe
+        )
+        late_data_policy = (
+            "variant_attribution_confirmed"
+            if test.stats_quality == "stage_attributed"
+            else "aggregate_late_events_unallocated_no_winner"
+        )
         return {
             "id": test.id,
             "connection_id": test.connection_id,
@@ -6228,6 +6784,9 @@ class ABTestService:
             "winner_p_value": winner_p_value,
             "winner_confidence": float(getattr(settings, "ab_test_winner_confidence", 0.95) or 0.95),
             "winner_worst_case_safe": winner_worst_case_safe,
+            "comparison_reliability": comparison_reliability,
+            "comparison_message": comparison_message,
+            "late_data_policy": late_data_policy,
             "stats_reconciliation_status": (self_state.get("stats_reconciliation") or {}).get("status") if isinstance(self_state := ABTestService._media_state(test), dict) else None,
             "stats_reconciliation_elapsed_sec": int((self_state.get("stats_reconciliation") or {}).get("elapsed_sec") or 0) if isinstance(self_state, dict) else 0,
             "stats_reconciliation_stable_snapshots": int((self_state.get("stats_reconciliation") or {}).get("stable_snapshots") or 0) if isinstance(self_state, dict) else 0,
@@ -6448,9 +7007,12 @@ class ABTestService:
                         locked_stuck.operation_state = ABTestOperationStatus.SUCCEEDED.value
                         locked_stuck.incident_id = None
                         locked_stuck.last_error = None
-                    elif current_status in self.NON_ACTIVE_CAMPAIGN_STATUSES:
+                    elif current_status in self.FINAL_CAMPAIGN_STATUSES:
                         locked_stuck.campaign_state = "stopped"
                     else:
+                        # Status 4/11 means non-serving/pause, not final
+                        # completion.  Drive the same terminal STOP path as
+                        # an operator request and confirm WB status 7.
                         await self._stop_campaign_confirmed(locked_stuck, promotion)
                     locked_stuck.last_error = (
                         (locked_stuck.last_error or "").rstrip()
@@ -6487,6 +7049,12 @@ class ABTestService:
                     candidate = await service.repository.get_for_user(user_id, test_id)
                     if not candidate:
                         return
+                    # The candidate read only decides which worker action to
+                    # run.  End that transaction before the potentially long
+                    # provider/media operation so one background task does
+                    # not pin an application QueuePool connection for the
+                    # whole reconciliation interval.
+                    await worker_db.commit()
                     try:
                         if safety and candidate.operation_state == "post_stop_reconciliation":
                             connection = await service._connection_or_404(candidate.user_id, candidate.connection_id, require_ab_access=False)

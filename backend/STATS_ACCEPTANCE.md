@@ -1,51 +1,65 @@
-# AB Test — Statistics / Attribution Acceptance Contract
+# AB-тест — предварительный контракт статистики и атрибуции
 
-This patch implements the latest agreed starting methodology from the 2026-09-28 Sergey clarification.
+Документ описывает текущие **предварительные настройки реализации**. Интервалы и пороги выбора победителя не являются окончательной методикой заказчика, пока Сергей явно их не примет.
 
-## Reconciliation contract
+## Сверка
 
-- Poll `fullstats` every 180 seconds by default.
-- Do not complete the stage before 600 seconds have elapsed after confirmed pause.
-- A settled stage requires 3 consecutive equal snapshots of views, clicks and spend, with no less than 180 seconds between snapshots.
-- Stop reconciliation at 1800 seconds. If the counters do not settle, set `data_unstable`; retain uncertainty and allow the experiment lifecycle to continue rather than inventing attribution.
-- While reconciliation is running, do not install the next photo and do not resume the campaign.
+- По умолчанию запрашивать `fullstats` каждые 180 секунд.
+- Не завершать этап раньше чем через 600 секунд после подтверждённой паузы.
+- Этап считается стабильным после трёх одинаковых снимков показов, кликов и расхода с интервалом не менее 180 секунд.
+- Остановить сверку через 1800 секунд. Если счётчики не стабилизировались, установить `data_unstable`, сохранить неопределённость и не придумывать атрибуцию.
+- Пока идёт сверка, не устанавливать следующую фотографию и не возобновлять кампанию.
 
-## Attribution contract
+## Атрибуция
 
-- Baseline is the cumulative campaign snapshot at the beginning of the stage.
-- Final stage totals are taken from the final post-pause snapshot.
-- Delta between baseline and final snapshot is attributed to the stage photo, including increments observed while the campaign remains paused.
-- During the first transition window after the next photo starts, deltas that cannot safely be attributed are retained as `unallocated` rather than guessed.
-- Raw provider snapshots are appended to the audit trail. Stage correction history is persisted in `media_state.stats_correction_history`.
+- Базовая точка — накопительный снимок кампании в начале этапа.
+- Итог этапа — последний снимок после паузы.
+- Разница между базовой и итоговой точками сохраняется как оценка этапа только для отчётности. Для автоматического победителя нужна полная атрибуция до уровня фотографий.
+- В первое окно перехода после запуска новой фотографии безопасно нераспределяемые дельты сохраняются в `unallocated`, а не приписываются наугад.
+- Сырые снимки провайдера добавляются в аудит; история корректировок сохраняется в `media_state.stats_correction_history`.
 
-## Winner contract
+## Победитель
 
-Winner is allowed only when:
+Победитель разрешён только если:
 
-1. every candidate variant meets the configured impression minimum (default 300);
-2. every candidate variant is confirmed installed;
-3. two-sided two-proportion significance is < 0.05 (95% confidence);
-4. legacy minimum CTR gap of 0.35 percentage points is also satisfied;
-5. the leader remains ahead under the configured worst-case allocation of all unallocated impressions/clicks.
+1. каждый кандидат достиг настроенного минимума показов (по умолчанию 300);
+2. установка каждой фотографии подтверждена;
+3. двусторонний тест двух пропорций дал значение < 0,05 (95% доверие);
+4. выполнен настроенный минимальный разрыв CTR;
+5. лидер сохраняет преимущество при наихудшем распределении всех нераспределённых показов и кликов.
 
-Otherwise the result remains undetermined and the API exposes an explicit decision reason.
+Иначе результат остаётся неопределённым, а API возвращает явную причину. Aggregate-only `fullstats` WB даёт `statistics_not_attributable`; оценка этапа не превращается в платного победителя.
 
-## Pilot
+Если часть кликов или показов не распределена по фотографиям, API дополнительно возвращает для каждой фотографии информационный диапазон `ctr_range_min`–`ctr_range_max` и ширину неопределённости `ctr_uncertainty_pp`. Интервал строится консервативно и показывается как возможный CTR; он не является основанием автоматически объявлять победителя.
 
-Run the controlled 60-minute pilot with the campaign paused:
+Для каждой фотографии также возвращаются `ctr_confidence_min`–`ctr_confidence_max` — 95% интервал Уилсона случайного разброса. При нераспределённых событиях его границы расширяются по допустимым вариантам attribution. На уровне теста `comparison_reliability` и `comparison_message` показывают одно из трёх состояний: «Разница CTR статистически надёжна», «Разница CTR находится в пределах статистической погрешности» или «Надёжность сравнения не установлена». Это информационный вывод; установка победителя остаётся отдельным fail-closed действием.
+
+После STOP агрегатная досверка относится к фото только при доказательстве из журнала медиа: остановлен первый и единственный подтверждённый этап, другие тестовые позиции не устанавливались. Во всех остальных случаях дельта остаётся `unallocated`; правило «всё последнему фото» не используется.
+
+Проверка STOP выполняется отдельной короткой сессией и закрывает транзакцию после каждого чтения. Ручной STOP возвращает принятое состояние сразу и продолжает остановку/восстановление в фоне. Ручная сверка уже выполняющейся post-STOP операции также возвращает сразу, не удерживая HTTP-запрос на 10–30 минут.
+
+Для запуска бюджет включает не только план этапов и базовый резерв, но и задержанный запас: по умолчанию до 600 показов в минуту за 300 секунд `fullstats`. Если эти условия меняются, сервер пересчитывает сумму и требует нового подтверждения; автоматического пополнения сверх подтверждения нет.
+
+## Пилот
+
+Контролируемый 60-минутный пилот запускается на остановленной кампании:
 
 ```bash
 python scripts/run_stats_settlement_pilot.py --test-id <ID> --minutes 60 --output pilot_stats.jsonl
 ```
 
-The script is read-only for WB campaign/media state. It records provider status and raw `fullstats` snapshots every three minutes. Use its output to calibrate the 10–30 minute bounds.
+Скрипт только читает состояние кампании и медиа WB. Он записывает статус провайдера и сырые снимки `fullstats` каждые три минуты. Результат нужен для калибровки границ 10–30 минут.
 
-## Separate-campaign alternative
+## Вариант с отдельными кампаниями
 
-The following tool calculates the deterministic budget portion already known by the application without inventing provider-specific values:
+Инструмент рассчитывает известную приложению часть бюджета без выдумывания значений провайдера:
 
 ```bash
 python scripts/evaluate_separate_campaign_option.py --photos 2 --views-per-variant 300 --cpm-rub 300
 ```
 
-Minimum provider deposit rules, campaign start latency and remaining-budget settlement/refund semantics are intentionally reported as `UNKNOWN` until measured against the current WB contract/live pilot.
+Минимальный депозит WB, задержка запуска и правила возврата остатка намеренно остаются `UNKNOWN`, пока не измерены по действующему контракту WB и live-пилоту.
+
+Оценочная разбивка (`stage_estimated`) не даёт безусловного вывода `reliable`: при таком качестве `comparison_reliability` остаётся `not_established`. Если разбивка подтверждена (`stage_attributed`), все события распределены и разница мала, выводом является `within_error`; это не доказательство равенства фотографий.
+
+Поздние клики могут прийти для показов, уже присутствовавших в предыдущем снимке. Поэтому 95% интервал Уилсона учитывает такие клики даже при `unallocated_views=0`; они не обрезаются до числа новых показов. Интервал случайного разброса и диапазон неопределённой атрибуции показываются раздельно.

@@ -54,6 +54,88 @@ def experiment(**overrides):
     return result
 
 
+def test_possible_ctr_range_exposes_uncertain_click_interval():
+    variant = SimpleNamespace(views=1441, clicks=86)
+    low, high, uncertainty = ABTestService._possible_ctr_range(variant, 276, 16)
+    assert round(low, 1) == 5.0
+    assert round(high, 1) == 7.1
+    assert round(uncertainty, 1) == 2.1
+
+
+def test_ctr_confidence_interval_remains_visible_without_unallocated_events():
+    variant = SimpleNamespace(views=1441, clicks=86)
+    low, high = ABTestService._ctr_confidence_interval(variant, 0, 0)
+    assert round(low, 1) == 4.9
+    assert round(high, 1) == 7.3
+
+
+def test_ctr_confidence_interval_keeps_late_clicks_without_new_views():
+    variant = SimpleNamespace(views=1000, clicks=50)
+    low, high = ABTestService._ctr_confidence_interval(variant, 0, 100)
+    assert round(low, 1) == 3.8
+    assert round(high, 1) == 17.3
+
+
+def test_ctr_confidence_interval_caps_at_one_hundred_for_known_views_with_late_clicks():
+    variant = SimpleNamespace(views=300, clicks=15)
+    low, high = ABTestService._ctr_confidence_interval(variant, 1000, 400)
+    assert low < 6
+    assert high == 100
+
+
+def test_comparison_reliability_separates_within_error_from_attribution_uncertainty():
+    test = experiment(stats_quality="stage_attributed")
+    test.variants[0].views, test.variants[0].clicks = 1000, 60
+    test.variants[1].views, test.variants[1].clicks = 1000, 59
+    reliability, message = ABTestService._comparison_reliability(
+        test,
+        ABTestService._two_proportion_p_value(60, 1000, 59, 1000),
+        True,
+    )
+    assert reliability == "within_error"
+    assert "погрешности" in message
+
+
+def test_empty_verified_journal_cannot_prove_single_stage_attribution():
+    test = experiment(current_variant_order=1)
+    assert not ABTestService._post_stop_single_stage_proven(test, {}, 1)
+
+
+def test_stage_estimated_unallocated_counters_are_unknown_in_response():
+    test = experiment(
+        stats_quality="stage_estimated",
+        unallocated_views=200,
+        unallocated_clicks=20,
+        last_total_views=200,
+        last_total_clicks=20,
+    )
+    payload = ABTestService.response(test)
+    assert payload["variants"][0]["views"] is None
+    assert payload["variants"][0]["clicks"] is None
+    assert payload["variants"][0]["attribution_quality"] == "estimated"
+
+
+@pytest.mark.asyncio
+async def test_post_stop_single_verified_stage_is_attributed_with_evidence(monkeypatch):
+    promotion = Promotion(snapshot(1450, 87, 452.4), snapshot(1450, 87, 452.4))
+    service = service_for(monkeypatch, promotion)
+    test = experiment(
+        status=ABTestStatus.STOPPED,
+        campaign_state="stopped",
+        current_variant_order=1,
+        settled_total_views=0,
+        settled_total_clicks=0,
+        settled_total_spend_rub=0,
+        media_state={"verified_positions": [1]},
+    )
+    await service._settle_stage_stats(test, promotion, attempts=2, post_stop=True)
+    assert test.variants[0].views == 1450
+    assert test.variants[0].clicks == 87
+    assert test.unallocated_views == 0
+    assert test.stats_quality == "stage_estimated"
+    assert test.media_state["variant_attribution"]["1"]["source"] == "post_stop_single_stage_confirmed"
+
+
 class Promotion:
     def __init__(self, *observations, minimum=300):
         self.observations = list(observations)
@@ -675,6 +757,7 @@ async def test_high_traffic_budget_guard_forecasts_missing_provider_lag(monkeypa
         test = experiment(
             budget_rub=1000,
             cpm_rub=300,
+            views_per_variant=1000,
             settled_total_views=0,
             settled_total_spend_rub=0,
             last_total_views=0,
@@ -684,5 +767,29 @@ async def test_high_traffic_budget_guard_forecasts_missing_provider_lag(monkeypa
         assert service._finish_loaded.await_count == 1
         assert test.status == ABTestStatus.STOPPED
         assert "защитный резерв" in (test.last_error or "")
+    finally:
+        settings.ab_test_budget_guard_reserve_rub = old
+
+
+@pytest.mark.asyncio
+async def test_high_traffic_allows_near_quota_stage_to_finish(monkeypatch):
+    """A stale lag forecast must not strand the last 30% of a paid stage."""
+    from app.core.config import settings
+    old = settings.ab_test_budget_guard_reserve_rub
+    settings.ab_test_budget_guard_reserve_rub = 300
+    try:
+        service = service_for(monkeypatch, Promotion(snapshot(750, 45, 225)))
+        test = experiment(
+            budget_rub=1000,
+            cpm_rub=300,
+            views_per_variant=1000,
+            settled_total_views=0,
+            settled_total_spend_rub=0,
+            last_total_views=0,
+            stage_started_at=NOW - timedelta(minutes=1),
+        )
+        await service._sync_loaded(test)
+        service._finish_loaded.assert_not_awaited()
+        assert test.status == ABTestStatus.RUNNING
     finally:
         settings.ab_test_budget_guard_reserve_rub = old

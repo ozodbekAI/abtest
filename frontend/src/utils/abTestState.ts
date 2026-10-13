@@ -20,6 +20,7 @@ export function safetyClosed(test: ABTest) {
 export function needsReconciliation(test: ABTest) {
   return test.operation_state === 'reconciliation_required' || test.status === 'failed'
     || test.media_status === 'external_conflict'
+    || test.operation_state === 'post_stop_reconciliation'
     || (['finished', 'stopped'].includes(test.status) && !safetyClosed(test));
 }
 
@@ -47,6 +48,7 @@ export function decisionLabel(decision?: string | null) {
 }
 
 export function moduleActionLabel(test: ABTest) {
+  if (test.operation_state === 'post_stop_reconciliation') return 'Фото уже восстановлены; сервер продолжает финальную сверку WB в фоне. Страница обновляется автоматически.';
   if (test.media_status === 'external_conflict') return 'Автоматический возврат фото заблокирован, чтобы сохранить внешние изменения. Требуется решение по составу медиа.';
   if (!safetyClosed(test) && needsReconciliation(test)) return 'Новые варианты и пополнения заблокированы. Сервер продолжает проверки остановки и безопасного восстановления независимо от этой вкладки.';
   if (test.media_status === 'waiting_image_reupload') return 'Реклама на подтверждённой паузе. Сервер ожидает разрешённого повтора загрузки и проверит фото до запуска.';

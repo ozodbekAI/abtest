@@ -55,8 +55,16 @@ class Settings(BaseSettings):
     ab_test_winner_confidence: float = 0.95
     ab_test_budget_guard_reserve_rub: int = 300
     ab_test_budget_guard_pending_lag_sec: int = 300  # reserve up to 5 min of delayed provider spend
+    # Safe default for a campaign with no reliable traffic history. The
+    # launch budget includes this five-minute delayed-statistics reserve;
+    # deployments can lower/raise it only with an explicit capacity decision.
+    ab_test_budget_guard_max_views_per_min: int = 600
     ab_test_scheduler_per_test_timeout_sec: int = 2400
     ab_test_scheduler_concurrency: int = 4
+    # External campaign creation/media preparation is bounded separately from
+    # long-running statistics workers. Excess starts are rejected before any
+    # WB mutation so the UI can retry without creating duplicate campaigns.
+    ab_test_start_concurrency: int = 4
     ab_test_max_budget_rub: int = 1_000_000_000
 
     @field_validator("cors_origins", mode="before")

@@ -25,6 +25,11 @@ OperationLockSessionLocal = async_sessionmaker(operation_lock_engine, class_=Asy
 # connection while a rate-limit wait or provider request is in flight.
 stats_lock_engine = create_async_engine(settings.database_url, echo=False, pool_pre_ping=True, poolclass=NullPool)
 StatsLockSessionLocal = async_sessionmaker(stats_lock_engine, class_=AsyncSession, expire_on_commit=False)
+# Rate-limit reservations are short database transactions, but they may be
+# created by every concurrent test at the same time.  Keep them off the
+# application QueuePool as well; otherwise a burst of statistics workers can
+# consume all API connections before the provider request even starts.
+RateLimitSessionLocal = async_sessionmaker(stats_lock_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:

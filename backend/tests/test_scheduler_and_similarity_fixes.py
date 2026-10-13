@@ -430,10 +430,6 @@ async def test_manual_reconcile_post_stop_runs_without_holding_card_lock():
         calls.append("lock")
         yield True
 
-    async def post_stop(test_obj, promotion):
-        calls.append("post_stop")
-        test_obj.operation_state = "succeeded"
-
     class DB:
         async def commit(self):
             calls.append("commit")
@@ -446,14 +442,14 @@ async def test_manual_reconcile_post_stop_runs_without_holding_card_lock():
     svc._operation_lock = lock
     svc._connection_or_404 = get_connection
     svc._clients = clients
-    svc._post_stop_reconcile = post_stop
+    svc._queue_post_stop_reconcile = lambda user_id, test_id: calls.append("queue")
     svc._finish_loaded = AsyncMock()
     svc.db = DB()
 
     result = await svc.reconcile(1, 1)
     assert result is test
-    assert calls.count("lock") == 1
-    assert "post_stop" in calls
+    assert calls.count("queue") == 1
+    assert calls.count("lock") == 0
     svc._finish_loaded.assert_not_awaited()
 
 
@@ -463,4 +459,6 @@ def test_fullstats_lock_uses_dedicated_nullpool_session():
     from app.services import wb_rate_limiter
 
     assert database.StatsLockSessionLocal is not database.AsyncSessionLocal
+    assert database.RateLimitSessionLocal is not database.AsyncSessionLocal
     assert "StatsLockSessionLocal" in inspect.getsource(wb_rate_limiter.WBRateLimiter.stats_lock)
+    assert "RateLimitSessionLocal" in inspect.getsource(wb_rate_limiter.WBRateLimiter.stats_lock)

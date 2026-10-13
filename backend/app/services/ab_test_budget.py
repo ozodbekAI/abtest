@@ -5,6 +5,8 @@ from __future__ import annotations
 MIN_TEST_BUDGET_RUB = 1_200
 BUDGET_STEP_RUB = 100
 DEFAULT_SAFETY_RESERVE_RUB = 300
+DEFAULT_SAFE_MAX_VIEWS_PER_MIN = 600
+DEFAULT_PROVIDER_LAG_SECONDS = 300
 
 
 def calculate_budget_breakdown(
@@ -67,3 +69,31 @@ def calculate_protected_budget(
     reserve = max(int(safety_reserve_rub or 0), 0)
     protected = base + reserve
     return ((protected + BUDGET_STEP_RUB - 1) // BUDGET_STEP_RUB) * BUDGET_STEP_RUB
+
+
+def calculate_lag_reserve(
+    cpm_rub: int,
+    *,
+    max_views_per_min: int = DEFAULT_SAFE_MAX_VIEWS_PER_MIN,
+    lag_seconds: int = DEFAULT_PROVIDER_LAG_SECONDS,
+) -> int:
+    """Reserve spend that can arrive while WB fullstats is delayed."""
+    rate = max(int(max_views_per_min or 0), 0)
+    lag = max(int(lag_seconds or 0), 0)
+    cpm = max(int(cpm_rub or 0), 0)
+    milli = rate * lag * cpm
+    return (milli + 60_000 - 1) // 60_000
+
+
+def calculate_operational_budget(
+    photos_count: int,
+    views_per_variant: int,
+    cpm_rub: int,
+    safety_reserve_rub: int = DEFAULT_SAFETY_RESERVE_RUB,
+    *,
+    max_views_per_min: int = DEFAULT_SAFE_MAX_VIEWS_PER_MIN,
+    lag_seconds: int = DEFAULT_PROVIDER_LAG_SECONDS,
+) -> int:
+    """Budget required for all stages plus the configured delayed-statistics window."""
+    protected = calculate_protected_budget(photos_count, views_per_variant, cpm_rub, safety_reserve_rub)
+    return ((protected + calculate_lag_reserve(cpm_rub, max_views_per_min=max_views_per_min, lag_seconds=lag_seconds) + BUDGET_STEP_RUB - 1) // BUDGET_STEP_RUB) * BUDGET_STEP_RUB

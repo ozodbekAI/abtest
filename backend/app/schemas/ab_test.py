@@ -63,9 +63,18 @@ class ABTestVariantResponse(BaseModel):
     image_url: str | None = None
     source_url: str | None = None
     wb_url: str | None = None
-    views: int
-    clicks: int
+    # None means the provider supplied aggregate/unallocated data and the
+    # amount cannot be truthfully assigned to this photo.
+    views: int | None
+    clicks: int | None
     ctr: float | None = None
+    ctr_confidence_min: float | None = None
+    ctr_confidence_max: float | None = None
+    # Possible interval when aggregate/unallocated clicks or impressions
+    # cannot be assigned to one photo. It is informational only.
+    ctr_range_min: float | None = None
+    ctr_range_max: float | None = None
+    ctr_uncertainty_pp: float | None = None
     spend_rub: float
     is_winner: bool
     attribution_quality: str = "unverified"
@@ -95,6 +104,9 @@ class ABTestResponse(BaseModel):
     winner_p_value: float | None = None
     winner_confidence: float = 0.95
     winner_worst_case_safe: bool | None = None
+    comparison_reliability: str = "not_established"
+    comparison_message: str = "Надёжность сравнения не установлена"
+    late_data_policy: str = "aggregate_late_events_unallocated_no_winner"
     stats_reconciliation_status: str | None = None
     stats_reconciliation_elapsed_sec: int = 0
     stats_reconciliation_stable_snapshots: int = 0

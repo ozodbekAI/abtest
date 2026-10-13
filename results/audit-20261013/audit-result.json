@@ -1,0 +1,14 @@
+{
+  "audit_date": "2026-10-13",
+  "source": "ABTEST-EDINYI-OTCHET-20261010",
+  "findings_total": 8,
+  "findings_pass": 8,
+  "backend_tests": {"passed": 135, "failed": 0},
+  "frontend_build": "PASS",
+  "npm_audit_high": {"vulnerabilities": 0, "status": "PASS"},
+  "dependency_fix": "source-map-js@1.2.2",
+  "post_patch_f06_e2e": "partial_pass_stage_reached_1350_views_before_settle_window",
+  "post_patch_full_e2e_f01_f09": "not_completed",
+  "real_wb_paid_pilot": "not_run",
+  "winner_policy": "variant-level attribution required; aggregate late events never auto-select a winner"
+}

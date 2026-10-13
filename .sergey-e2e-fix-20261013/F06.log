@@ -1,0 +1,6 @@
+[     0s] ### F06: Высокий трафик 600/мин при задержке статистики 4 мин: хватает ли бюджета на второй этап,
+    сохраняются ли данные второго этапа при прерывании.
+[    65s] старт: 200
+[    65s] status=running op=succeeded var=1 camp=running media=variant_applied stats=preliminary views=0 synced=None err=
+[   445s] status=running op=succeeded var=1 camp=paused media=variant_applied stats=preliminary views=1350 synced=2026-10-13T10:28:03.948556Z err=
+[  1186s] status=running op=succeeded var=1 camp=paused media=variant_applied stats=stage_estimated views=3750 synced=2026-10-13T10:40:26.631910Z err=

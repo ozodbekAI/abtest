@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.exc import IntegrityError
 
 from app.models.ab_test import ABTest, ABTestStatus, ABTestVariant
-from app.services.ab_test_budget import calculate_required_budget
+from app.services.ab_test_budget import calculate_operational_budget, calculate_required_budget
 from app.services.ab_test_service import ABTestService
 from app.utils.imagehash_compat import phash
 
@@ -86,6 +86,12 @@ def test_lifecycle_lock_can_be_released():
 def test_budget_is_rounded_and_never_below_floor():
     assert calculate_required_budget(2, 300, 300) >= 1200
     assert calculate_required_budget(5, 1000, 500) == 2500
+
+
+def test_operational_budget_includes_delayed_stats_reserve():
+    # Two 1,000-impression stages at 300 ₽ CPM, plus 600 views/min for a
+    # five-minute provider lag, require 2,400 ₽ before launch confirmation.
+    assert calculate_operational_budget(2, 1000, 300, 300, max_views_per_min=600, lag_seconds=300) == 2400
 
 
 def test_media_hash_detects_real_change():

@@ -9,7 +9,7 @@ import type { ABTest, ABTestVariant } from '../types';
 import { imageUrl } from '../utils/media';
 import { campaignStateLabel, mediaStateLabel, statsStateLabel, testStatusLabel, decisionLabel, needsReconciliation as requiresReconciliation, canSafelyStop, safetyClosed, moduleActionLabel } from '../utils/abTestState';
 
-function formatNumber(value: number) { return new Intl.NumberFormat('ru-RU').format(Math.round(value || 0)); }
+function formatNumber(value: number | null | undefined) { return value == null ? '—' : new Intl.NumberFormat('ru-RU').format(Math.round(value || 0)); }
 function formatRub(value: number) { return `${new Intl.NumberFormat('ru-RU').format(Math.round(value || 0))} ₽`; }
 function formatOptionalRub(value?: number | null) { return value == null ? '—' : formatRub(value); }
 function formatDecimalRub(value?: number | null) { return value == null ? '—' : `${new Intl.NumberFormat('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 2 }).format(value)} ₽`; }
@@ -17,6 +17,15 @@ function calculateCpc(spend: number, clicks: number) { return clicks > 0 ? spend
 function calculateCr(orders: number, clicks: number) { return clicks > 0 ? (orders / clicks) * 100 : null; }
 function calculateCpm(spend: number, views: number) { return views > 0 ? (spend / views) * 1000 : null; }
 function formatPercent(value: number | null) { if (value == null) return '—'; return `${Number(value || 0).toLocaleString('ru-RU', { minimumFractionDigits: 1, maximumFractionDigits: 2 })}%`; }
+function formatCtrRange(variant: ABTestVariant) {
+  if (variant.ctr_range_min == null || variant.ctr_range_max == null) return null;
+  if (Math.abs(variant.ctr_range_max - variant.ctr_range_min) < 0.0001) return null;
+  return `${formatPercent(variant.ctr_range_min)}–${formatPercent(variant.ctr_range_max)}`;
+}
+function formatCtrConfidence(variant: ABTestVariant) {
+  if (variant.ctr_confidence_min == null || variant.ctr_confidence_max == null) return null;
+  return `${formatPercent(variant.ctr_confidence_min)}–${formatPercent(variant.ctr_confidence_max)}`;
+}
 function newOperationKey(testId: number) {
   return typeof crypto !== 'undefined' && crypto.randomUUID
     ? crypto.randomUUID()
@@ -49,17 +58,29 @@ export function ABTestDetailPage() {
   useEffect(() => { void load(); }, [id]);
   useEffect(() => { if (!test || (test.status !== 'running' && !requiresReconciliation(test))) return; const timer = window.setInterval(() => void load(true), 30000); return () => window.clearInterval(timer); }, [test?.status, test?.operation_state, test?.campaign_state, test?.media_status, id]);
 
-  const action = async (kind: 'sync' | 'stop' | 'reconcile' | 'resume') => {
+  const action = async (kind: 'sync' | 'stop' | 'reconcile' | 'resume' | 'retry' | 'delete') => {
     if (busy || (kind === 'resume' && !resumeConfirmation)) return;
+    if (kind === 'retry' && (!test || test.status !== 'draft')) return;
+    if (kind === 'delete' && (!test || test.status !== 'draft')) return;
+    if (kind === 'retry' && !window.confirm('Повторить запуск без автоматического пополнения? Если средств WB недостаточно, сначала пополните кампанию в кабинете WB, затем повторите попытку.')) return;
+    if (kind === 'delete' && !window.confirm('Удалить этот черновик? Внешняя кампания не создавалась.')) return;
     setBusy(true);
     try {
-      const result = kind === 'sync'
+      if (kind === 'delete') {
+        await api.deleteABTest(id);
+        toast.success('Черновик удалён');
+        navigate('/ab-tests');
+        return;
+      }
+      const result: ABTest = kind === 'sync'
         ? await api.syncABTest(id)
         : kind === 'stop'
           ? await api.stopABTest(id)
           : kind === 'resume'
             ? await api.startABTest(id, { auto_deposit: false, confirmed_cpm: resumeConfirmation?.minimum_cpm || undefined, funding_source: resumeConfirmation?.funding_source as 'auto' | 'account' | 'mutual' | 'bonus', draft_fingerprint: resumeConfirmation?.start_confirmation_fingerprint || '' }, newOperationKey(id))
-            : await api.reconcileABTest(id);
+            : kind === 'retry'
+              ? await api.startABTest(id, { auto_deposit: false, funding_source: 'account', draft_fingerprint: test?.start_confirmation_fingerprint || '' }, newOperationKey(id))
+              : await api.reconcileABTest(id);
       setTest(result);
       if (kind === 'resume') setResumeConfirmation(null);
       toast.success(
@@ -69,6 +90,8 @@ export function ABTestDetailPage() {
               ? safetyClosed(result) ? 'Остановка и состояние фото подтверждены' : 'Остановка запрошена. Проверьте статус кампании и фото.'
               : kind === 'resume'
                 ? result.campaign_state === 'running' ? 'Запуск существующей кампании подтверждён' : 'Запуск запрошен; проверяется состояние'
+                : kind === 'retry'
+                  ? result.campaign_state === 'running' ? 'Запуск черновика подтверждён' : 'Повторный запуск запрошен; проверяется состояние'
                 : result.status === 'running'
                   ? 'Тест продолжен в существующей кампании'
                   : 'Операция сверена'
@@ -104,9 +127,11 @@ export function ABTestDetailPage() {
     ? totalPhotoCount
     : Math.min(totalPhotoCount, Math.max(0, (test.current_variant_order || 1) - 1));
   const progressPercent = test.status === 'finished' ? 100 : progress;
+  const canRetryDraft = test.status === 'draft' && !test.wb_campaign_id && test.operation_state !== 'reconciliation_required';
+  const canDeleteDraft = canRetryDraft;
 
   return <AppShell><div className="page-wrap ab-detail-page">
-    <DetailPageHeader test={test} busy={busy} needsReconciliation={needsReconciliation} canResumeExistingCampaign={canResumeExistingCampaign} onBack={() => navigate('/ab-tests')} onSync={() => void action('sync')} onReconcile={() => void action('reconcile')} onResume={() => setResumeConfirmation(test)} onStop={() => void action('stop')} />
+    <DetailPageHeader test={test} busy={busy} needsReconciliation={needsReconciliation} canResumeExistingCampaign={canResumeExistingCampaign} canRetryDraft={canRetryDraft} canDeleteDraft={canDeleteDraft} onBack={() => navigate('/ab-tests')} onSync={() => void action('sync')} onReconcile={() => void action('reconcile')} onResume={() => setResumeConfirmation(test)} onRetry={() => void action('retry')} onDelete={() => void action('delete')} onStop={() => void action('stop')} />
     {loadError && <div className="ab-error-banner" role="alert"><CircleAlert size={18} /><div><strong>Данные не удалось обновить</strong><span>{loadError}. Ниже показаны последние полученные данные; текущее состояние WB может отличаться.</span></div></div>}
     {(test.last_error || needsReconciliation) && <div className="ab-error-banner reconciliation" role="alert"><CircleAlert size={18} /><div><strong>{testStatusLabel(test)}</strong><span>{test.last_error || 'Состояние кампании или фото требует проверки.'}</span><div className="ab-incident-help"><span>Магазин: {test.store_name} · Товар: {test.nm_id} · Серия: #{test.id} · Кампания WB: {test.wb_campaign_id ? `#${test.wb_campaign_id}` : 'не создана'}</span><span>Последний учтённый расход: {formatDecimalRub(test.total_spend_rub)} · Данные на: {test.last_synced_at ? new Date(test.last_synced_at).toLocaleString('ru-RU') : 'время не подтверждено'}</span><span>Кампания: {campaignStateLabel(test.campaign_state)} · Фото: {mediaStateLabel(test.media_status)}</span>{!['stopped', 'not_created', 'paused'].includes(test.campaign_state) && <b>Остановка не подтверждена. Расход может продолжаться.</b>}<b>Что делает модуль</b><span>{moduleActionLabel(test)}</span><b>Что делать</b><span>Откройте кампанию #{test.wb_campaign_id || '—'} в указанном кабинете WB. Если реклама работает, остановите её вручную или кнопкой «Остановить рекламу». Проверьте полный порядок фото; затем нажмите «Сверить операцию». Не повторяйте пополнение при неизвестном результате.</span><span>Инцидент: {test.incident_id || 'номер ещё не получен'}</span></div></div></div>}
     <section className="ab-state-grid" aria-label="Подтверждённое состояние"><div><small>Исход серии</small><strong>{testStatusLabel(test)}</strong></div><div><small>Кампания WB</small><strong>{campaignStateLabel(test.campaign_state)}</strong></div><div><small>Медиа</small><strong>{mediaStateLabel(test.media_status)}</strong></div><div><small>Статистика</small><strong>{statsStateLabel(test.stats_quality)}</strong></div><div><small>Последняя синхронизация</small><strong>{test.last_synced_at ? new Date(test.last_synced_at).toLocaleString('ru-RU') : 'Не подтверждена'}</strong></div><div><small>Остаток в кампании WB</small><strong>Не подтверждён</strong><small>Проверьте в кабинете WB; бюджет минус расход не доказывает остаток.</small></div></section>
@@ -124,20 +149,28 @@ function DetailPageHeader({
   busy,
   needsReconciliation,
   canResumeExistingCampaign,
+  canRetryDraft,
+  canDeleteDraft,
   onBack,
   onSync,
   onReconcile,
   onResume,
+  onRetry,
+  onDelete,
   onStop,
 }: {
   test: ABTest;
   busy: boolean;
   needsReconciliation: boolean;
   canResumeExistingCampaign: boolean;
+  canRetryDraft: boolean;
+  canDeleteDraft: boolean;
   onBack: () => void;
   onSync: () => void;
   onReconcile: () => void;
   onResume: () => void;
+  onRetry: () => void;
+  onDelete: () => void;
   onStop: () => void;
 }) {
   const status = testStatusLabel(test);
@@ -151,7 +184,7 @@ function DetailPageHeader({
     </div>
     <div className="ab-detail-intro"><h1>Подробности теста</h1><p>{test.title}</p></div>
     <section className="ab-summary-card">
-      <div className="ab-summary-heading"><div><h2>{test.title}</h2><p>Артикул: {test.nm_id}{test.wb_campaign_id ? ` · Кампания ID: ${test.wb_campaign_id}` : ''}</p></div><div className="ab-summary-actions">{needsReconciliation && <button className="primary-button" onClick={onReconcile} disabled={busy}><RefreshCw size={15} /> Сверить операцию</button>}{canResumeExistingCampaign && <button className="outline-button" onClick={onResume} disabled={busy}><Play size={15} /> Продолжить запуск</button>}{canSafelyStop(test) && <button className="danger-outline-button" onClick={onStop} disabled={busy}><Pause size={15} /> Остановить рекламу</button>}</div></div>
+      <div className="ab-summary-heading"><div><h2>{test.title}</h2><p>Артикул: {test.nm_id}{test.wb_campaign_id ? ` · Кампания ID: ${test.wb_campaign_id}` : ''}</p></div><div className="ab-summary-actions">{needsReconciliation && <button className="primary-button" onClick={onReconcile} disabled={busy}><RefreshCw size={15} /> Сверить операцию</button>}{canRetryDraft && <button className="primary-button" onClick={onRetry} disabled={busy}><Play size={15} /> Повторить запуск</button>}{canDeleteDraft && <button className="danger-outline-button" onClick={onDelete} disabled={busy}>Удалить черновик</button>}{canResumeExistingCampaign && <button className="outline-button" onClick={onResume} disabled={busy}><Play size={15} /> Продолжить запуск</button>}{canSafelyStop(test) && <button className="danger-outline-button" onClick={onStop} disabled={busy}><Pause size={15} /> Остановить рекламу</button>}</div></div>
       <div className="ab-summary-metrics"><SummaryMetric label="Кол-во фото" value={String(test.variants.length)} /><SummaryMetric label="Показов на одно фото" value={formatNumber(test.views_per_variant)} /><SummaryMetric label="Расход" value={formatRub(test.total_spend_rub)} /><SummaryMetric label="CTR по кампании" value={test.total_views ? formatPercent(campaignCtr) : '—'} /><SummaryMetric label="CPO кампании" value={formatOptionalRub(test.total_cpo)} /></div>
     </section>
   </>;
@@ -172,23 +205,25 @@ function FinalResultsSection({ test, variants, winner }: { test: ABTest; variant
   return <section className="ab-final-results">
     <div className={`ab-final-banner ${isFinished && winner ? 'complete' : 'pending'}`}><div><h2>{bannerTitle}</h2><p>{bannerText}</p><small>{bannerNote}</small></div></div>
     {statsAreAggregate && <div className="ab-inline-warning"><CircleAlert size={15} /> CTR кампании: <strong>{test.total_views ? `${totalCtr.toFixed(2)}%` : '—'}</strong> ({formatNumber(test.total_clicks)} кликов из {formatNumber(test.total_views)} показов). CTR отдельных фото скрыт: разбивка по фото не подтверждена. Эти данные не определяют победителя.</div>}
-    {(test.unallocated_views > 0 || test.unallocated_clicks > 0 || test.unallocated_spend_rub > 0) && <div className="ab-inline-warning"><CircleAlert size={15} /> Не распределено по фото: {formatNumber(test.unallocated_views)} показов, {formatNumber(test.unallocated_clicks)} кликов, {formatRub(test.unallocated_spend_rub)}.</div>}{(test.stats_reconciliation_status === 'waiting' || test.stats_reconciliation_status === 'settled' || test.stats_reconciliation_status === 'data_unstable') && <div className="ab-inline-warning"><CircleAlert size={15} /> Сверка: {test.stats_reconciliation_status === 'settled' ? 'завершена' : test.stats_reconciliation_status === 'data_unstable' ? 'данные неустойчивы' : 'ожидается'} · {Math.floor((test.stats_reconciliation_elapsed_sec || 0) / 60)} мин · одинаковых снимков: {test.stats_reconciliation_stable_snapshots || 0}.</div>}{test.winner_p_value != null && <div className="ab-inline-warning">95% проверка разницы CTR: p={test.winner_p_value.toFixed(4)}{test.winner_worst_case_safe == null ? '' : test.winner_worst_case_safe ? ' · worst-case по нераспределённым данным пройден' : ' · worst-case по нераспределённым данным не пройден'}.</div>}
+    {test.late_data_policy === 'aggregate_late_events_unallocated_no_winner' && <div className="ab-inline-warning"><CircleAlert size={15} /> Поздние клики и переходные показы могут относиться к предыдущему фото. Их распределение явно помечено как оценка или «нераспределено»; до подтверждения WB по вариантам победитель по ним не объявляется.</div>}
+    {(test.unallocated_views > 0 || test.unallocated_clicks > 0 || test.unallocated_spend_rub > 0) && <div className="ab-inline-warning"><CircleAlert size={15} /> Не распределено по фото: {formatNumber(test.unallocated_views)} показов, {formatNumber(test.unallocated_clicks)} кликов, {formatRub(test.unallocated_spend_rub)}.</div>}{(test.stats_reconciliation_status === 'waiting' || test.stats_reconciliation_status === 'settled' || test.stats_reconciliation_status === 'data_unstable') && <div className="ab-inline-warning"><CircleAlert size={15} /> Сверка: {test.stats_reconciliation_status === 'settled' ? 'завершена' : test.stats_reconciliation_status === 'data_unstable' ? 'данные неустойчивы' : 'ожидается'} · {Math.floor((test.stats_reconciliation_elapsed_sec || 0) / 60)} мин · одинаковых снимков: {test.stats_reconciliation_stable_snapshots || 0}.</div>}{test.comparison_message && <div className={`ab-inline-warning comparison-${test.comparison_reliability || 'not_established'}`}><CircleAlert size={15} /> {test.comparison_message}{test.winner_p_value != null ? ` · p=${test.winner_p_value.toFixed(4)}` : ''}</div>}
     <div className="ab-final-cards">{ordered.map((variant) => {
       const isWinner = Boolean(winner && variant.id === winner.id);
       const isCurrent = isRunning && variant.position === test.current_variant_order;
-      const badge = isWinner ? 'Лучший' : isCurrent ? 'Сейчас в тесте' : isFinished ? 'Этап завершён' : variant.views > 0 ? 'Собрано' : 'Ожидает';
+      const badge = isWinner ? 'Лучший' : isCurrent ? 'Сейчас в тесте' : isFinished ? 'Этап завершён' : (variant.views || 0) > 0 ? 'Собрано' : 'Ожидает';
       const ctr = !statsAreAggregate && variant.views ? formatPercent(variant.ctr) : '—';
+      const ctrRange = formatCtrRange(variant);
       const variantLabel = variant.position === 0 ? 'Главное фото' : `Фото ${variant.position}`;
       return <article className={`ab-final-card ${isWinner ? 'winner' : ''}`} key={variant.id}>
         <div className="ab-final-image">{variant.image_url ? <AuthenticatedImage src={imageUrl(variant.image_url)} alt={variantLabel} /> : <span><Clock3 size={24} /></span>}<b className={isCurrent ? 'current' : ''}>{badge}</b></div>
-        <div className="ab-final-card-body"><strong>{variantLabel}</strong><em>{ctr}</em><small>Точность: {variant.attribution_quality === 'confirmed' ? 'подтверждена' : variant.attribution_quality === 'estimated' ? 'оценка по этапу' : variant.attribution_quality === 'unstable' ? 'данные неустойчивы' : 'не подтверждена'}</small><div className="ab-final-card-stats"><span><Eye size={13} /> Показы: {formatNumber(variant.views)}</span><span>Клики: {formatNumber(variant.clicks)}</span></div></div>
+        <div className="ab-final-card-body"><strong>{variantLabel}</strong><em>{ctr}{ctrRange ? ` (${ctrRange})` : ''}</em>{ctrRange && <small>Возможный CTR с учётом нераспределённых кликов</small>}{formatCtrConfidence(variant) && <small>95% статистический диапазон: {formatCtrConfidence(variant)}</small>}<small>Точность: {variant.attribution_quality === 'confirmed' ? 'подтверждена' : variant.attribution_quality === 'estimated' ? 'оценка по этапу' : variant.attribution_quality === 'unstable' ? 'данные неустойчивы' : variant.attribution_quality === 'unallocated_after_stop' ? 'часть не распределена' : 'не подтверждена'}</small><div className="ab-final-card-stats"><span><Eye size={13} /> Показы: {formatNumber(variant.views)}</span><span>Клики: {formatNumber(variant.clicks)}</span></div></div>
       </article>;
     })}</div>
     <div className="ab-comparison-wrap"><table className="ab-comparison-table"><thead><tr><th>Показатель</th>{ordered.map((variant) => <th key={variant.id}>{variant.position === 0 ? 'Главное фото' : `Фото ${variant.position}`}</th>)}</tr></thead><tbody>
-      <tr><th>Статус</th>{ordered.map((variant) => { const isWinner = Boolean(winner && variant.id === winner.id); const isCurrent = isRunning && variant.position === test.current_variant_order; const status = isWinner ? 'Лучший' : isCurrent ? 'В тесте' : isFinished ? 'Этап завершён' : variant.views > 0 ? 'Собрано' : 'Ожидает'; return <td key={variant.id}><span className={`ab-final-status ${isWinner ? 'winner' : isCurrent ? 'current' : ''}`}>{status}</span></td>; })}</tr>
+      <tr><th>Статус</th>{ordered.map((variant) => { const isWinner = Boolean(winner && variant.id === winner.id); const isCurrent = isRunning && variant.position === test.current_variant_order; const status = isWinner ? 'Лучший' : isCurrent ? 'В тесте' : isFinished ? 'Этап завершён' : (variant.views || 0) > 0 ? 'Собрано' : 'Ожидает'; return <td key={variant.id}><span className={`ab-final-status ${isWinner ? 'winner' : isCurrent ? 'current' : ''}`}>{status}</span></td>; })}</tr>
       <tr><th>Показов</th>{ordered.map((variant) => <td key={variant.id}>{formatNumber(variant.views)}</td>)}</tr>
       <tr><th>Кликов</th>{ordered.map((variant) => <td key={variant.id}>{formatNumber(variant.clicks)}</td>)}</tr>
-      <tr><th>CTR</th>{ordered.map((variant) => { const isWinner = Boolean(winner && variant.id === winner.id); return <td className={isWinner ? 'emphasis' : ''} key={variant.id}>{!statsAreAggregate && variant.views ? formatPercent(variant.ctr) : '—'}</td>; })}</tr>
+      <tr><th>CTR</th>{ordered.map((variant) => { const isWinner = Boolean(winner && variant.id === winner.id); const range = formatCtrRange(variant); const confidence = formatCtrConfidence(variant); return <td className={isWinner ? 'emphasis' : ''} key={variant.id}><div>{!statsAreAggregate && variant.views ? formatPercent(variant.ctr) : '—'}</div>{range && <small>возможный: {range}</small>}{confidence && <small>95%: {confidence}</small>}</td>; })}</tr>
       <tr><th>В сравнении с лучшим CTR в тесте</th>{ordered.map((variant) => { const isWinner = Boolean(winner && variant.id === winner.id); return <td key={variant.id}>{winner ? (isWinner ? <strong className="ab-best-cell"><Trophy size={14} /> Лучший</strong> : `${relativeToWinner(variant, winner)}%`) : '—'}</td>; })}</tr>
     </tbody></table></div>
     <section className="ab-additional-metrics"><div className="ab-additional-heading"><div><h3>Дополнительные показатели</h3><p>Ключевые показатели эффективности рекламной кампании.</p></div><span>Данные WB</span></div><div className="ab-additional-grid"><div className="ab-additional-metric"><small>CPC кампании</small><strong>{formatDecimalRub(calculateCpc(test.total_spend_rub, test.total_clicks))}</strong><span>стоимость клика</span></div><div className="ab-additional-metric"><small>Заказы</small><strong>{formatNumber(test.total_orders)}</strong><span>по кампании</span></div><div className="ab-additional-metric"><small>CR кампании</small><strong>{formatPercent(calculateCr(test.total_orders, test.total_clicks) || 0)}</strong><span>заказы из кликов</span></div><div className="ab-additional-metric"><small>CPM факт</small><strong>{formatDecimalRub(calculateCpm(test.total_spend_rub, test.total_views))}</strong><span>за 1 000 показов</span></div></div></section>
